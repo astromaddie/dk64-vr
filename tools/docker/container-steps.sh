@@ -4,13 +4,19 @@
 #
 #   container-steps.sh tools|rom|recomp|build|package|abi|smoke
 #
-# Environment: BUILD_DIR (default build-linux-<arch>), JOBS, BUILD_TYPE (default Release),
+# Environment: BUILD_DIR (default build-linux-<arch>, or build-linux-<arch>-vr with DK64_VR=1), JOBS,
+# BUILD_TYPE (default Release), DK64_VR (1: the OpenXR VR build),
 # ROM_FILE (rom step: the original US .z64, mounted read-only by build-linux.sh).
 set -euo pipefail
 
 cd /src
 arch="$(uname -m)"
-build="${BUILD_DIR:-build-linux-$arch}"
+vr="${DK64_VR:-0}"
+if [[ "$vr" == 1 ]]; then
+	build="${BUILD_DIR:-build-linux-$arch-vr}"
+else
+	build="${BUILD_DIR:-build-linux-$arch}"
+fi
 jobs="${JOBS:-$(nproc)}"
 type="${BUILD_TYPE:-Release}"
 out="$build/package/DK64Recompiled"
@@ -61,10 +67,19 @@ step_build() {
 		-DPATCHES_C_COMPILER=clang-15 -DPATCHES_LD=ld.lld-15 \
 		-DCMAKE_C_FLAGS="$flags" -DCMAKE_CXX_FLAGS="$flags" \
 		-DVCPKG_MANIFEST_INSTALL=OFF -DNFD_PORTAL=ON -DOPENSSL_USE_STATIC_LIBS=ON \
-		-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON '-DCMAKE_INSTALL_RPATH=$ORIGIN/lib'
+		-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON '-DCMAKE_INSTALL_RPATH=$ORIGIN/lib' \
+		-DDK64_VR="$([[ "$vr" == 1 ]] && echo ON || echo OFF)"
 	cmake --build "$build" --target DK64Recompiled -j "$jobs"
 	file "$build/DK64Recompiled"
 	ls -l "$build/DK64Recompiled"
+}
+
+step_vrtest() {
+	# The VR bridge's host unit tests (src/vr/tests), on their own: no ROM, no recompiled code.
+	cmake -S src/vr/tests -B "$build/vrtest" -GNinja -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_COMPILER=clang-15 -DCMAKE_CXX_COMPILER=clang++-15
+	cmake --build "$build/vrtest"
+	"$build/vrtest/dk64vr_tests"
 }
 
 step_package() {

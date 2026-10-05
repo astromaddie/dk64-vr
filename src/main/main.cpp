@@ -57,6 +57,10 @@
 #include "../../patches/ui.h"
 #include "../../patches/misc_funcs.h"
 
+#ifdef DK64_VR
+#include "../vr/xr/dk64vr_host.h"
+#endif
+
 namespace {
 
 class PacingRendererContext final : public ultramodern::renderer::RendererContext {
@@ -677,6 +681,15 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
     dk64::launcher_animation_setup(menu);
 }
 
+#ifdef DK64_VR
+// Player input as the game reads it, with the VR diagnostics' input merged in (diag_autostart).
+static bool get_n64_input_vr(int player_index, uint16_t* buttons_out, float* x_out, float* y_out) {
+    bool result = recompinput::profiles::get_n64_input(player_index, buttons_out, x_out, y_out);
+    dk64vr::hostFilterInput(player_index, buttons_out, x_out, y_out);
+    return result;
+}
+#endif
+
 #define REGISTER_FUNC(name) recomp::overlays::register_base_export(#name, name)
 
 int main(int argc, char** argv) {
@@ -842,7 +855,11 @@ int main(int argc, char** argv) {
 
     ultramodern::input::callbacks_t input_callbacks{
         .poll_input = recompinput::poll_inputs,
+#ifdef DK64_VR
+        .get_input = get_n64_input_vr,
+#else
         .get_input = recompinput::profiles::get_n64_input,
+#endif
         .set_rumble = recompinput::set_rumble,
         .get_connected_device_info = get_connected_device_info,
     };
@@ -891,7 +908,17 @@ int main(int argc, char** argv) {
         },
     };
 
+#ifdef DK64_VR
+    // The OpenXR host, before the renderer creates its Vulkan instance (docs/VR_ARCHITECTURE.md).
+    // Without a headset runtime the game stays flat.
+    dk64vr::hostInstall(recompui::file::get_app_folder_path());
+#endif
+
     recomp::start(cfg);
+
+#ifdef DK64_VR
+    dk64vr::hostShutdown();
+#endif
 
     NFD_Quit();
 

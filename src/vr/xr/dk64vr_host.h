@@ -1,0 +1,21 @@
+// The DK64 VR host: the OpenXR session behind RT64's VR interface (lib/rt64/src/hle/rt64_vr.h).
+// Only in a DK64_VR build. docs/VR_ARCHITECTURE.md describes the frame protocol.
+#pragma once
+
+#include <cstdint>
+#include <filesystem>
+
+namespace dk64vr {
+
+// From main(), before the renderer starts. Reads <appFolder>/vr.toml, creates the OpenXR instance
+// and finds the headset; when that works, hooks plume's Vulkan creation and RT64's frame loop.
+// Returns false (and leaves the flat game untouched) when there is no headset runtime.
+bool hostInstall(const std::filesystem::path &appFolder);
+
+// From main(), after the renderer has shut down.
+void hostShutdown();
+
+// The game's N64 input callback, for player 1: merges diagnostic input (diag_autostart).
+void hostFilterInput(int player, uint16_t *buttons, float *x, float *y);
+
+}

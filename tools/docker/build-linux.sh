@@ -16,9 +16,11 @@
 #   package  stage build-linux-<arch>/package/DK64Recompiled (binary, assets, lib/, launcher)
 #   abi      the ABI check on the staged package (fails above glibc 2.35 / GLIBCXX 3.4.30)
 #   smoke    start the package under Xvfb + lavapipe for a few seconds (DK64_ROM optional)
+#   vrtest   build and run the VR bridge's host unit tests
 #   all      image, tools, rom, recomp, build, package, abi
 #
-# JOBS sets the build parallelism (default: every CPU of the container).
+# JOBS sets the build parallelism (default: every CPU of the container). DK64_VR=1 makes the
+# OpenXR VR build, in build-linux-<arch>-vr/.
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -28,7 +30,7 @@ want_sha1="cf806ff2603640a748fca5026ded28802f1f4a50"
 
 # Passed through only when set, so the container script's own defaults apply otherwise.
 env_args=()
-for var in BUILD_DIR JOBS BUILD_TYPE SMOKE_SECONDS; do
+for var in BUILD_DIR JOBS BUILD_TYPE SMOKE_SECONDS DK64_VR; do
 	[[ -z "${!var:-}" ]] || env_args+=(-e "$var=${!var}")
 done
 
@@ -52,7 +54,7 @@ check_rom() {
 
 case "$step" in
 	image) docker build -t "$image" -f "$repo/tools/docker/linux.Dockerfile" "$repo/tools/docker" ;;
-	tools | recomp | build | package | abi) run_step "$step" ;;
+	tools | recomp | build | package | abi | vrtest) run_step "$step" ;;
 	rom)
 		check_rom
 		# Read-only mount: the ROM is never copied anywhere on the host.

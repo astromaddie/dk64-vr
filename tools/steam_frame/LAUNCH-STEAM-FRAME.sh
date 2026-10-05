@@ -32,11 +32,33 @@ if [[ ! -e "$APP_FOLDER_PATH/DK64.z64" ]]; then
 	((${#roms[@]} == 1)) && ln -s "${roms[0]}" "$APP_FOLDER_PATH/DK64.z64"
 fi
 
+# One-shot diagnostics for an unattended run (standard.md section 8): a Steam launch has fixed
+# arguments, so they come from $APP_FOLDER_PATH/vr-diag, which is read and deleted here, so a
+# normal launch never inherits them. Lines are DK64_VR_<KEY>=<value> (exported) or ARGS=<extra
+# game arguments>, e.g. ARGS=--game dk64 to skip the launcher.
+diag="$APP_FOLDER_PATH/vr-diag"
+diag_lines=()
+extra_args=()
+if [[ -f "$diag" ]]; then
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		case "$line" in
+			DK64_VR_*=*) export "${line?}"; diag_lines+=("$line") ;;
+			ARGS=*) read -r -a extra_args <<< "${line#ARGS=}"; diag_lines+=("$line") ;;
+		esac
+	done < "$diag"
+	rm -f "$diag"
+fi
+
 log="${DK64_LOG:-run-stdout.txt}"
 {
 	echo "[launch] $(date -Is) $here/DK64Recompiled $*"
 	echo "[launch] data dir $APP_FOLDER_PATH"
 	[[ -e "$APP_FOLDER_PATH/DK64.z64" ]] || echo "[launch] no DK64.z64 in $APP_FOLDER_PATH: the game will stop at its ROM screen"
+	if ((${#diag_lines[@]})); then
+		echo "[vr] diag: ${diag_lines[*]}"
+	else
+		echo "[vr] diag: no vr-diag file"
+	fi
 } > "$log"
 
-exec ./DK64Recompiled "$@" >> "$log" 2>&1
+exec ./DK64Recompiled "$@" ${extra_args[@]+"${extra_args[@]}"} >> "$log" 2>&1

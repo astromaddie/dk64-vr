@@ -24,6 +24,9 @@ ARG FREETYPE_VERSION=2.13.3
 ARG FREETYPE_SHA256=5c3a8e78f7b24c20b25b54ee575d6daa40007a5f4eea2845861c3409b3021747
 ARG CURL_VERSION=8.11.1
 ARG CURL_SHA256=a889ac9dbba3644271bd9d1302b5c22a088893719b72be3487bc3d401e5c4e80
+# OpenXR-SDK release-1.1.63 (commit f2448a8797c85814aa892efc1ab8707900fbcc78), for DK64_VR builds
+ARG OPENXR_VERSION=1.1.63
+ARG OPENXR_SHA256=5b8dac0608f49498fe8e95f562fe6bcf0bc781e561f137348a8c251d06a88b6f
 
 # libssl-dev supplies the static OpenSSL that libcurl links; mesa-vulkan-drivers (lavapipe) and
 # xvfb are only for the container smoke run. python3 runs the ROM decompressor.
@@ -81,6 +84,22 @@ RUN set -eux; \
         -DCURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt -DCURL_CA_PATH=/etc/ssl/certs; \
     cmake --build build-curl --target install; \
     ldconfig; \
+    rm -rf /tmp/*
+
+
+# The OpenXR loader, static, with its headers, in /opt/openxr (as the SM64 VR port builds it).
+# DK64_VR builds link /opt/openxr/lib/libopenxr_loader.a, so the package ships no loader library.
+RUN set -eux; \
+    cd /tmp; \
+    wget -q -O openxr.tar.gz "https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-${OPENXR_VERSION}.tar.gz"; \
+    echo "${OPENXR_SHA256}  openxr.tar.gz" | sha256sum -c -; \
+    tar -xzf openxr.tar.gz; \
+    cmake -S "OpenXR-SDK-release-${OPENXR_VERSION}" -B build-openxr -GNinja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/openxr -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DDYNAMIC_LOADER=OFF -DBUILD_API_LAYERS=OFF -DBUILD_TESTS=OFF -DBUILD_CONFORMANCE_TESTS=OFF \
+        -DBUILD_WITH_SYSTEM_JSONCPP=OFF -DBUILD_WITH_XCB_HEADERS=OFF -DBUILD_WITH_WAYLAND_HEADERS=OFF; \
+    cmake --build build-openxr --target install; \
+    echo "OpenXR-SDK release-${OPENXR_VERSION} sha256 ${OPENXR_SHA256}" > /opt/openxr/PINNED; \
     rm -rf /tmp/*
 
 WORKDIR /src

@@ -49,6 +49,15 @@ endif()
 
 set(RT64_STATIC TRUE)
 set(RT64_SDL_WINDOW_VULKAN TRUE)
+
+# The Steam Frame VR renderer (docs/VR_ARCHITECTURE.md): OpenXR through RT64's VR host interface
+# and plume's Vulkan create hooks. Off, the build is the flat game, unchanged.
+option(DK64_VR "Build the OpenXR VR renderer (Linux)" OFF)
+if (DK64_VR)
+    set(RT64_VR ON)
+    add_compile_definitions(RT64_VR=1 PLUME_VULKAN_CREATE_HOOKS=1)
+    set(DK64_OPENXR_PREFIX "/opt/openxr" CACHE PATH "Install prefix of the static OpenXR loader (OpenXR-SDK release-1.1.63)")
+endif()
 add_compile_definitions(HLSL_CPU)
 
 # SDL incorrectly includes a definition of _m_prefetch when compiling with clang-cl, which conflicts with the builtin definition and causes a build error. -
@@ -381,5 +390,29 @@ endforeach()
 target_sources(DK64Recompiled PRIVATE ${GENERATED_NRM_SOURCES})
 
 target_sources(DK64Recompiled PRIVATE ${SOURCES})
+
+if (DK64_VR)
+    set(DK64_VR_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_math.cpp
+        ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_sched.cpp
+        ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_settings.c
+        ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_log.c
+        ${CMAKE_SOURCE_DIR}/src/vr/xr/xr_host.cpp
+        ${CMAKE_SOURCE_DIR}/src/vr/diag/dk64vr_diag.cpp
+        ${CMAKE_SOURCE_DIR}/third_party/sfvr/src/sfvr_settings.c
+        ${CMAKE_SOURCE_DIR}/third_party/sfvr/src/sfvr_perf.c
+    )
+    target_sources(DK64Recompiled PRIVATE ${DK64_VR_SOURCES})
+    # VR code builds with warnings on, whatever the rest of the project uses (lesson 30).
+    set_source_files_properties(${DK64_VR_SOURCES} PROPERTIES COMPILE_OPTIONS "-Wall;-Wno-unused-parameter")
+    target_include_directories(DK64Recompiled PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/vr/include
+        ${CMAKE_SOURCE_DIR}/src/vr/bridge
+        ${CMAKE_SOURCE_DIR}/third_party/sfvr/include
+        ${DK64_OPENXR_PREFIX}/include
+    )
+    target_compile_definitions(DK64Recompiled PRIVATE DK64_VR=1)
+    target_link_libraries(DK64Recompiled PRIVATE ${DK64_OPENXR_PREFIX}/lib/libopenxr_loader.a ${CMAKE_DL_LIBS})
+endif()
 
 set_property(TARGET DK64Recompiled PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
