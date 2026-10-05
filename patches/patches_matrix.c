@@ -1,4 +1,5 @@
 #include "common_structs.h"
+#include "vr_state.h"
 
 extern u8 skip_interpolation;
 
@@ -1350,6 +1351,16 @@ RECOMP_PATCH Gfx* func_global_asm_807007B8(Gfx* dl) {
     u8 temp_v0;
     Struct807FD808 *temp_t2;
 
+    // @recomp: VR. The flare is a screen-space sprite at the projected sun position and would
+    // ride with the head, so it is not drawn. The countdowns it would have run down still tick.
+    if (recomp_vr_is_active()) {
+        for (i = 0; i < D_global_asm_80754BC0; i++) {
+            if (D_global_asm_807FD838[D_global_asm_807444FC ^ 1][i]) {
+                D_global_asm_807FD838[D_global_asm_807444FC ^ 1][i]--;
+            }
+        }
+        return dl;
+    }
     if (D_global_asm_80754BC0 != 0) {
         gDPPipeSync(dl++);
         dl = func_global_asm_8070068C(dl);

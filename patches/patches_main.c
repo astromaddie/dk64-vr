@@ -1,6 +1,7 @@
 #include "common_structs.h"
 #include "patches_main.h"
 #include "ui.h"
+#include "vr_state.h"
 
 #define gScissorUpLX D_global_asm_80744498
 #define gScissorUpLY D_global_asm_8074449C
@@ -95,6 +96,8 @@ void updateLag(s32 value) {
 }
 
 RECOMP_PATCH void func_global_asm_80600674(void) {
+    // @recomp: VR. Once per game frame, after the frame's updates and display lists are built.
+    vr_frame_hook();
     s32 max_boost = 1;
     s32 min_boost = 20;
     s32 newBoost;
@@ -420,6 +423,11 @@ RECOMP_PATCH s32 func_global_asm_80658E8C(f32 arg0, f32 arg1, f32 arg2, u8 arg3,
     s16 var_a2;
     s16 var_v1;
 
+    // @recomp: VR. The head turns away from the game's frustum, so nothing is culled by it.
+    // Draw distance culling lives with the callers and still applies.
+    if (recomp_vr_is_active()) {
+        return 0;
+    }
     func_global_asm_80626F8C(arg0, arg1, arg2, &sp44, &sp40, 0, 1.0f, cc_player_index);
     sp3E = sp44;
     sp3C = sp40;
@@ -1201,6 +1209,11 @@ RECOMP_PATCH s32 func_global_asm_80658134(s32 arg0, s32 arg1, s32 arg2, s32 arg3
     Struct807F6C14 *temp_v0;
     s32 var_a2;
 
+    // @recomp: VR. Every portal counts as inside the frustum, so the chunk traversal reaches
+    // the rooms behind the head. The callers only test the result for non-zero.
+    if (recomp_vr_is_active()) {
+        return 4;
+    }
     sp24 = 0;
     sp28 = 0;
     temp_v0 = &D_global_asm_807F6C14[arg0];

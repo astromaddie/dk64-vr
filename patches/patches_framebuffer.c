@@ -1,5 +1,6 @@
 #include "common_structs.h"
 #include "ui.h"
+#include "vr_state.h"
 
 extern u32 D_global_asm_80744478;
 extern s32 D_global_asm_80747B24;
@@ -847,6 +848,29 @@ RECOMP_PATCH Gfx* func_global_asm_80704B20(Gfx* dl, f32 arg1, f32 arg2, Mtx* arg
         sp12C * (D_global_asm_80754EF8[arg4][3].green + (arg8 * (D_global_asm_80754EF8[arg5][3].green - D_global_asm_80754EF8[arg4][3].green))),
         sp128 * (D_global_asm_80754EF8[arg4][3].blue + (arg8 * (D_global_asm_80754EF8[arg5][3].blue - D_global_asm_80754EF8[arg4][3].blue))),
         0xFF);
+    // @recomp: VR. The screen-space strip below would turn with the head; draw the same gradient
+    // as a dome around the camera instead. The four colours are the ones computed above and the
+    // stops are the flat strip's own vertex heights. The Isles preset (5) also slides its horizon
+    // with the camera height (temp_f2 above), which becomes a shift of the whole gradient.
+    if (recomp_vr_is_active()) {
+        u32 vr_colors[4];
+        s16 vr_stops[4];
+        Vtx *vr_strip = (Vtx *)D_global_asm_80754ED8[arg4];
+        f32 vr_shift = 0.0f;
+
+        vr_colors[0] = sp140;
+        vr_colors[1] = sp13C;
+        vr_colors[2] = sp138;
+        vr_colors[3] = sp134;
+        vr_stops[0] = vr_strip[0].v.ob[1];
+        vr_stops[1] = vr_strip[2].v.ob[1];
+        vr_stops[2] = vr_strip[4].v.ob[1];
+        vr_stops[3] = vr_strip[6].v.ob[1];
+        if (arg4 == 5) {
+            vr_shift = (0.08 * character_change_array->unk2CA) - 75.0;
+        }
+        return vr_sky_dome(dl, arg3, vr_colors, vr_stops, vr_shift);
+    }
     gDPPipeSync(dl++);
     gDPSetRenderMode(dl++, G_RM_AA_OPA_SURF, G_RM_AA_OPA_SURF2);
     gDPSetCombineMode(dl++, G_CC_SHADE, G_CC_SHADE);
@@ -927,6 +951,16 @@ RECOMP_PATCH Gfx* func_global_asm_807069A4(Gfx* dl, f32 arg1, f32 arg2, s32 arg3
     s32 width, height;
     f32 upscale_ratio;
 
+    // @recomp: VR. The panning 320x240 texture is screen-space; in the headset the sky is a
+    // dome of the texture's average colour (the cloud detail is not reproduced).
+    if (recomp_vr_is_active()) {
+        if (D_global_asm_807FD8A0 == NULL) {
+            D_global_asm_807FD8A0 = getPointerTableFile(TABLE_14_TEXTURES_HUD, arg3, 0U, 0U);
+        }
+        temp_s3 = character_change_array->playerPointer;
+        func_global_asm_807065F8(temp_s3->y_position, &sp9B, &sp9A, &sp99);
+        return vr_sky_dome_textured(dl, &D_global_asm_807FD8A8[D_global_asm_807444FC], D_global_asm_807FD8A0, sp9B, sp9A, sp99);
+    }
     recomp_get_ui_bounds(&width, &height);
     upscale_ratio = (f32)(width * 3) / (f32)(height * 4);  // x0.75 == / (4/3)
 
@@ -1003,6 +1037,15 @@ extern f32 D_global_asm_80754CE8;
 extern s16 D_global_asm_807FD800;
 extern f32 loading_zone_transition_speed;
 extern u8 loading_zone_transition_type;
+
+// @recomp: VR. The sun and cloud disc is a screen-space sprite placed by projecting a world
+// direction through the camera, so in the headset it would ride along with the head. Left out.
+static Gfx *sky_sun_sprite(Gfx *dl, s16 arg1, s16 arg2, s16 arg3) {
+    if (recomp_vr_is_active()) {
+        return dl;
+    }
+    return func_global_asm_80705F5C(dl, arg1, arg2, arg3);
+}
 
 // @recomp: Skybox manager
 RECOMP_PATCH Gfx* func_global_asm_80707980(Gfx* dl, f32 arg1, f32 arg2, Mtx *arg3, s16 arg4) {
@@ -1103,7 +1146,7 @@ RECOMP_PATCH Gfx* func_global_asm_80707980(Gfx* dl, f32 arg1, f32 arg2, Mtx *arg
             break;
         case MAP_JAPES_ARMY_DILLO:
             dl = func_global_asm_80704B20(dl, arg1, arg2, arg3, 3, 3, 1, -1, 0.0f);
-            dl = func_global_asm_80705F5C(dl, 0, 0x7D00, 0);
+            dl = sky_sun_sprite(dl, 0, 0x7D00, 0);
             break;
         case MAP_FUNGI:
             if ((character_change_array->chunk >= 0xC) && (character_change_array->chunk < 0x12)) {
@@ -1111,7 +1154,7 @@ RECOMP_PATCH Gfx* func_global_asm_80707980(Gfx* dl, f32 arg1, f32 arg2, Mtx *arg
             } else {
                 func_global_asm_80705C00(0, 0x5DC0, 1U);
                 dl = func_global_asm_80704B20(dl, arg1, arg2, arg3, 2, 2, 1, -1, 0.0f);
-                dl = func_global_asm_80705F5C(dl, 0, 0x5DC0, 1);
+                dl = sky_sun_sprite(dl, 0, 0x5DC0, 1);
             }
             break;
         case MAP_FUNGI_MINECART:
@@ -1147,26 +1190,36 @@ RECOMP_PATCH Gfx* func_global_asm_80707980(Gfx* dl, f32 arg1, f32 arg2, Mtx *arg
             break;
         case MAP_GALLEON_PUFFTOSS:
             dl = func_global_asm_80704B20(dl, arg1, arg2, arg3, 6, 6, 1, -1, 0.0f);
-            dl = func_global_asm_80705F5C(dl, 0xC8, 0x4268, 0);
+            dl = sky_sun_sprite(dl, 0xC8, 0x4268, 0);
             break;
         case MAP_CASTLE:
             dl = func_global_asm_80704B20(dl, arg1, arg2, arg3, 6, 6, 1, -1, 0.0f);
-            dl = func_global_asm_80705F5C(dl, 0x3E8, 0x2EE0, 0);
+            dl = sky_sun_sprite(dl, 0x3E8, 0x2EE0, 0);
             break;
         case MAP_KLUMSY_ENDING:
             func_global_asm_80705C00(0x8FC, 0x1388, 0U);
             dl = func_global_asm_80704B20(dl, arg1, arg2, arg3, 7, 7, 0, -1, 0.0f);
             break;
         case MAP_BLOOPERS_ENDING:
+            // @recomp: VR. A flat white fill covers only the 4:3 viewport; use a white dome.
+            if (recomp_vr_is_active()) {
+                dl = vr_sky_dome_solid(dl, arg3, 0xFFFFFFFF);
+                break;
+            }
             gDPSetFillColor(dl++, 0xFFFFFFFF);
             goto block_55;
         case MAP_GALLEON_BARREL_BLAST:
+            // @recomp: VR. 0xFFC1 is RGBA5551 (31, 31, 16).
+            if (recomp_vr_is_active()) {
+                dl = vr_sky_dome_solid(dl, arg3, 0xFFFF84FF);
+                break;
+            }
             gDPSetFillColor(dl++, 0xFFC1FFC1);
             goto block_55;
         case MAP_MAIN_MENU:
             func_global_asm_80705C00(0x8FC, 0x1388, 1U);
             dl = func_global_asm_80704B20(dl, arg1, arg2, arg3, 7, 6, 0, -1, D_global_asm_80754CE8);
-            dl = func_global_asm_80705F5C(dl, 0xC8, 0x2EE0, 2);
+            dl = sky_sun_sprite(dl, 0xC8, 0x2EE0, 2);
             break;
             
         default:
