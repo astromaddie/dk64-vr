@@ -324,7 +324,7 @@ a bar shows above or below the picture.
 ## 10. Wear checklist (about 15 minutes)
 
 Build: branch `vr-play`, installed as the `DK64VR` devkit title (binary md5
-`7bf2c22ed7aab6c4f97f1d04e802dd02`, no diagnostics armed). Before starting: in SteamVR's per-app settings set DK64VR to 72 Hz. Launch from the Steam
+`7c3ea340deb5c2f970380091a8aab207`, no diagnostics armed). Before starting: in SteamVR's per-app settings set DK64VR to 72 Hz. Launch from the Steam
 library (not SSH). Claim the Frame as `user-wearing`. Read the log afterwards with
 `tools/steam_frame/deploy.sh --logs` (FRAME_HOST=steamos@192.168.1.31).
 

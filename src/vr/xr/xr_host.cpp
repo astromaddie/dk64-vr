@@ -606,7 +606,7 @@ public:
         }
 
         // The same HUD as the image already shown is not drawn again.
-        if (hudShown && (hudSignature == hudSignatureShown)) {
+        if (hudShown && (hudSignature == hudSignatureShown) && !hudDumpDue) {
             hudSkipsSame++;
             return nullptr;
         }
@@ -645,7 +645,7 @@ public:
             hudDumpDue = false;
             plume::VulkanTexture *image = hudChain.textures[hudChain.index].get();
             frameWorker->commandList->begin();
-            recordReadback(frameWorker->commandList.get(), image, hudChain, hudReadback, "vr-hud");
+            recordReadback(frameWorker->commandList.get(), image, hudChain, hudReadback, "vr-hud", hudDumpIndex);
             frameWorker->commandList->barriers(plume::RenderBarrierStage::GRAPHICS, plume::RenderTextureBarrier(image, plume::RenderTextureLayout::COLOR_WRITE));
             frameWorker->commandList->end();
             frameWorker->execute();
@@ -1393,6 +1393,7 @@ private:
         dumpDue = (nextDumpFrame > 0) && (dumpsDone < uint64_t(setting("dump_count"))) && (stereoFrames + 1 >= nextDumpFrame);
         if (dumpDue) {
             hudDumpDue = true;  // with the next HUD image
+            hudDumpIndex = dumpsDone;
         }
     }
 
@@ -2065,7 +2066,7 @@ private:
         }
     }
 
-    void recordReadback(plume::RenderCommandList *commandList, plume::VulkanTexture *image, const Swapchain &chain, Readback &readback, const std::string &name) {
+    void recordReadback(plume::RenderCommandList *commandList, plume::VulkanTexture *image, const Swapchain &chain, Readback &readback, const std::string &name, int64_t index = -1) {
         const uint64_t size = uint64_t(chain.width) * chain.height * 4;
         if (!readback.buffer || (readback.width != chain.width) || (readback.height != chain.height)) {
             readback.buffer = device->createBuffer(plume::RenderBufferDesc::ReadbackBuffer(size));
@@ -2090,7 +2091,7 @@ private:
         vkCmdPipelineBarrier(static_cast<plume::VulkanCommandList *>(commandList)->vk, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
         readback.pending = true;
         char suffix[64];
-        snprintf(suffix, sizeof(suffix), "-%03" PRIu64 "-yaw%d.png", dumpsDone, int(std::lround(diagYawDeg)));
+        snprintf(suffix, sizeof(suffix), "-%03" PRIu64 "-yaw%d.png", (index >= 0) ? uint64_t(index) : dumpsDone, int(std::lround(diagYawDeg)));
         std::error_code ec;
         std::filesystem::create_directories(dataDir / "vr-dumps", ec);
         readback.path = (dataDir / "vr-dumps" / (name + suffix)).string();
@@ -2198,6 +2199,7 @@ private:
     bool hudReleasedOnce = false;
     bool hudLogged = false;
     bool hudDumpDue = false;
+    uint64_t hudDumpIndex = 0;
     uint32_t lastHudCalls = 0;
     uint64_t hudSignatureShown = 0;
     uint64_t hudGameFrames = 0;

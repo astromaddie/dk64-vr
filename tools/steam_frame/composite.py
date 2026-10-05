@@ -10,7 +10,7 @@ and alpha, not a capture of the compositor.
   composite.py RUN_DIR --layers N --eye 0|1 [--eye-image F] [--panel F] [--hud F] [--out F]
 
 N picks the N-th logged layers line (negative counts from the end). Images default to none
-(the layer is then drawn in a flat colour so its placement still shows).
+(the layer is then drawn as a magenta outline only, so its placement shows without tinting).
 """
 import argparse
 import math
@@ -137,10 +137,14 @@ def main():
             continue
         img = images.get(q["name"])
         if img is None:
-            colour = {"panel": [0.9, 0.9, 0.9, 1.0], "hud": [1.0, 0.5, 0.0, 0.5]}.get(q["name"], [1, 1, 1, 1])
-            px = np.tile(colour, (on.sum(), 1))
-        else:
-            px = sample(img, q["rect"], x[on] / w + 0.5, 0.5 - y[on] / h)
+            # No image for this layer: draw only its outline (1 px), so the placement shows
+            # without tinting what lies under it.
+            print(f"note: no image for the {q['name']} layer; drawn as an outline only")
+            px_w = 2 * a.tan / n
+            edge = on & ((np.abs(np.abs(x) - w / 2) < px_w * dist) | (np.abs(np.abs(y) - h / 2) < px_w * dist))
+            out[edge] = [1.0, 0.0, 1.0]
+            continue
+        px = sample(img, q["rect"], x[on] / w + 0.5, 0.5 - y[on] / h)
         alpha = px[:, 3:4] if q["name"] != "panel" else 1.0
         out[on] = px[:, :3] * alpha + out[on] * (1 - alpha)
 
