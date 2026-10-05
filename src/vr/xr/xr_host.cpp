@@ -30,12 +30,19 @@
 #include "render/rt64_render_worker.h"
 
 #include "dk64vr_game_state.h"
+#include "dk64vr_input.h"
+#include "dk64vr_control.h"
 #include "dk64vr_log.h"
 #include "dk64vr_math.h"
 #include "dk64vr_sched.h"
 #include "dk64vr_settings.h"
 #include "sfvr/sfvr_perf.h"
 #include "../diag/dk64vr_diag.h"
+#include "xr_input.h"
+
+#include <SDL.h>
+#include "recompui/recompui.h"
+#include "recompinput/recompinput.h"
 
 namespace dk64vr {
 
@@ -144,6 +151,7 @@ public:
         for (const XrExtensionProperties &e : extensions) {
             haveVulkan2 = haveVulkan2 || (strcmp(e.extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME) == 0);
             haveRefreshRate = haveRefreshRate || (strcmp(e.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0);
+            haveFrameProfile = haveFrameProfile || (strcmp(e.extensionName, "XR_VALVE_frame_controller_interaction") == 0);
         }
 
         if (!haveVulkan2) {
@@ -154,6 +162,11 @@ public:
         std::vector<const char *> enabled = { XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME };
         if (haveRefreshRate) {
             enabled.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+        }
+
+        // The Steam Frame's controller profile, bound first when offered (standard.md section 2).
+        if (haveFrameProfile) {
+            enabled.push_back("XR_VALVE_frame_controller_interaction");
         }
 
         XrInstanceCreateInfo createInfo = { XR_TYPE_INSTANCE_CREATE_INFO };
@@ -183,9 +196,9 @@ public:
 
         XrSystemProperties systemProps = { XR_TYPE_SYSTEM_PROPERTIES };
         xrGetSystemProperties(instance, systemId, &systemProps);
-        dk64vr_logpf("[openxr]", "runtime %s %u.%u.%u, system %s, refresh-rate extension %s", instanceProps.runtimeName,
+        dk64vr_logpf("[openxr]", "runtime %s %u.%u.%u, system %s, refresh-rate extension %s, Frame controller profile %s", instanceProps.runtimeName,
             XR_VERSION_MAJOR(instanceProps.runtimeVersion), XR_VERSION_MINOR(instanceProps.runtimeVersion), XR_VERSION_PATCH(instanceProps.runtimeVersion),
-            systemProps.systemName, haveRefreshRate ? "yes" : "no");
+            systemProps.systemName, haveRefreshRate ? "yes" : "no", haveFrameProfile ? "yes" : "no");
 
         getProc("xrGetVulkanGraphicsRequirements2KHR", getGraphicsRequirements);
         getProc("xrCreateVulkanInstanceKHR", createVulkanInstance);
@@ -238,9 +251,21 @@ public:
         dk64vr_settings_free(&settings);
     }
 
-    void filterInput(int player, uint16_t *buttons) {
-        if ((player != 0) || (buttons == nullptr)) {
+    void filterInput(int player, uint16_t *buttons, float *x, float *y) {
+        if ((player != 0) || (buttons == nullptr) || (x == nullptr) || (y == nullptr)) {
             return;
+        }
+
+        // The controllers as the N64 pad, OR-merged with any real pad (never key injection).
+        // recompinput already blanks the real pad while a recomp menu has the input.
+        InputResult vr;
+        {
+            std::scoped_lock lock(inputMutex);
+            vr = latestInput;
+        }
+
+        if (!recompinput::game_input_disabled()) {
+            mergeN64(*buttons, *x, *y, vr);
         }
 
         const double now = monotonicSeconds();
@@ -382,7 +407,9 @@ public:
         rendering = frameState.shouldRender || forceRender;
         synthetic = forceRender && !frameState.shouldRender;
         eyesRecorded[0] = eyesRecorded[1] = false;
+        setPaused(!forceRender && !(focused && frameState.shouldRender), focused ? "headset in standby" : "focus lost");
         if (!rendering) {
+            updateInput(false);
             frameMode = RT64::VrFrame::Mode::Flat;
             frame.mode = frameMode;
             frame.flatHeight = PanelHeight;
@@ -390,6 +417,7 @@ public:
         }
 
         locateEyes();
+        updateInput(true);
         checkDiagExit();
         const double now = monotonicSeconds();
         probing = (setting("probe_seconds") > 0.0) && ((now - sessionStartS) < setting("probe_seconds"));
@@ -597,6 +625,7 @@ public:
             }
 
             panelWanted = !stereoShown;
+            panelShownLast = !stereoShown && !probing && panelReady.load();
         }
 
         XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
@@ -694,9 +723,18 @@ public:
         panelMutex.unlock();
     }
 
+    // Game thread: the game's Rumble Pak motor (ultramodern's set_rumble), as haptics.
+    void setRumble(int channel, bool on) {
+        if (channel == 0) {
+            rumbleOn = on;
+        }
+    }
+
     void threadExit() override {
         watchdogArm(false);
+        dk64vr_set_paused(0);
         dk64vr_set_active(0);
+        input.destroy();
         destroySession();
     }
 
@@ -824,6 +862,7 @@ private:
             dk64vr_logpf("[openxr]", "no B8G8R8A8_SRGB swapchain format: no flat panel");
         }
 
+        input.create(instance, session, haveFrameProfile);
         frameWorker = std::make_unique<RT64::RenderWorker>(device, "VR Frame", plume::RenderCommandListType::DIRECT);
         panelWorker = std::make_unique<RT64::RenderWorker>(device, "VR Panel", plume::RenderCommandListType::DIRECT);
         dk64vr_logpf("[openxr]", "session created; eye swapchains %ux%u format %d, panel %ux%u", eyeChain[0].width, eyeChain[0].height, int(eyeChain[0].format), panelChain.width, panelChain.height);
@@ -957,6 +996,7 @@ private:
     void onSessionState(XrSessionState state) {
         static const char *names[] = { "unknown", "idle", "ready", "synchronized", "visible", "focused", "stopping", "loss pending", "exiting" };
         dk64vr_logpf("[openxr]", "session %s", (int(state) >= 0 && int(state) <= 8) ? names[state] : "?");
+        focused = (state == XR_SESSION_STATE_FOCUSED);
         switch (state) {
         case XR_SESSION_STATE_READY: {
             if (sessionFailed) {
@@ -983,12 +1023,14 @@ private:
         }
         case XR_SESSION_STATE_STOPPING:
             sessionRunning = false;
+            input.stopHaptics();
             dk64vr_set_active(0);
             xrEndSession(session);
             break;
         case XR_SESSION_STATE_EXITING:
         case XR_SESSION_STATE_LOSS_PENDING:
             sessionRunning = false;
+            setPaused(false, "the session is ending");
             dk64vr_set_active(0);
             quitOnce("the runtime ended the session");
             break;
@@ -1140,6 +1182,7 @@ private:
         Pose yaw;
         yaw.q = quatFromYaw(diagYawDeg * 3.1415926f / 180.0f);
         headInOrigin = poseMul(yaw, headInOrigin);
+        headInOriginQ = headInOrigin.q;
         for (uint32_t eye = 0; eye < 2; eye++) {
             eyeInHead[eye] = poseMul(headInOrigin, eyeFromHead[eye]);
             eyeSubmitPose[eye] = poseMul(origin, eyeInHead[eye]);
@@ -1158,7 +1201,18 @@ private:
 
         bool want;
         const char *why;
-        if (setting("diag_force_stereo") != 0.0) {
+        const bool uiWanted = uiCapturing || (monotonicSeconds() < uiRequestUntilS);
+        if (uiWanted) {
+            // A recomp menu (or a toggle on its way): the panel at once, no hysteresis.
+            if (stereoLatched) {
+                stereoLatched = false;
+                latchCount = 0;
+                dk64vr_logf("mode: panel (recomp menu)");
+            }
+
+            return;
+        }
+        else if (setting("diag_force_stereo") != 0.0) {
             want = cameraSeen;
             why = "diag_force_stereo";
         }
@@ -1182,6 +1236,253 @@ private:
         else {
             latchCount = 0;
         }
+    }
+
+
+    // ----------------------------------------------------------------------------------------
+    // Input (workload thread, once per display frame)
+
+    void setPaused(bool paused, const char *why) {
+        if (paused != gamePaused) {
+            gamePaused = paused;
+            dk64vr_set_paused(paused ? 1 : 0);
+            dk64vr_logf("game %s (%s)", paused ? "frozen" : "running", paused ? why : "focused and rendering");
+            if (paused) {
+                input.stopHaptics();
+            }
+        }
+    }
+
+    InputConfig inputConfig() const {
+        InputConfig c;
+        c.rightStickX = (setting("right_stick_x") != 0.0) ? RightStickX::GameCamera : RightStickX::Turn;
+        c.turnMode = TurnMode(int(setting("turn_mode")));
+        c.snapAngleDeg = float(setting("snap_angle"));
+        c.smoothSpeedDps = float(setting("smooth_turn_speed"));
+        c.moveFromView = (setting("move_from_view") != 0.0);
+        return c;
+    }
+
+    int dominantHand() const {
+        return (setting("dominant_hand") != 0.0) ? 0 : 1;  // 0 left, 1 right
+    }
+
+    // Yaw of the movement reference (move_relative: head, left or right hand) relative to the
+    // game camera's heading, which is the recentred origin's forward.
+    float moveYawRad() const {
+        const int relative = int(setting("move_relative"));
+        if (relative != 0) {
+            Pose aim;
+            if (input.aimPose((relative == 1) ? 0 : 1, aim)) {
+                return quatYaw(quatMul(quatConj(origin.q), aim.q));
+            }
+        }
+
+        return quatYaw(headInOriginQ);
+    }
+
+    void updateInput(bool renderingNow) {
+        const bool live = renderingNow && focused && input.ready() && (synthetic == false);
+        const InputSample s = input.sample(live, localSpace, frameState.predictedDisplayTime);
+        uiCapturing = recompui::is_context_capturing_input();
+        uiMouse = uiCapturing && recompui::is_context_capturing_mouse();
+        const dk64vr_game_state state = gameState();
+        InputContext context;
+        context.menuOpen = uiCapturing;
+        context.stereoPlay = stereoLatched && !cinemaActive && ((state.scene == DK64VR_SCENE_GAMEPLAY) || (state.scene == DK64VR_SCENE_FIRST_PERSON));
+        context.viewYawRad = moveYawRad();
+        const float dt = float(std::min(periodS, 0.1));
+        const InputResult r = mapper.update(s, inputConfig(), context, displayS, dt);
+        if (s.valid && !inputLogged) {
+            inputLogged = true;
+            dk64vr_logf("input: first live sample (right_stick_x %s, turn_mode %d, snap %d, move_from_view %d)",
+                (setting("right_stick_x") != 0.0) ? "camera" : "turn", int(setting("turn_mode")), int(setting("snap_angle")), int(setting("move_from_view")));
+        }
+
+        if (r.recentre) {
+            recentrePending = true;
+            dk64vr_logf("recentre: View held");
+        }
+
+        if (r.systemBuzz) {
+            sfvr_haptic_event(&input.haptics, SFVR_HAND_BOTH, SFVR_HAPTIC_SYSTEM);
+        }
+
+        if (r.turnDeg != 0.0f) {
+            applyTurn(r.turnDeg);
+        }
+
+        sendNav(r.navHeld);
+        updatePointer(s);
+
+        // The game's Rumble Pak: 40 ms pulses on both hands while the motor runs.
+        if (rumbleOn.load() && s.valid) {
+            if (displayS >= nextRumbleS) {
+                sfvr_haptic_submit(&input.haptics, SFVR_HAND_BOTH, 1.0f, SFVR_RUMBLE_PULSE_SECONDS);
+                nextRumbleS = displayS + SFVR_RUMBLE_PULSE_SECONDS;
+            }
+        }
+
+        if (s.valid) {
+            input.flushHaptics(float(setting("haptics")));
+        }
+
+        {
+            std::scoped_lock lock(inputMutex);
+            latestInput = r;
+        }
+
+        // Action-state log for unattended runs (no wearer can press anything; the log shows the
+        // path is live): any change of held N64 buttons, at most a few lines a second.
+        if (s.valid && (r.buttons != lastLoggedButtons) && ((displayS - lastButtonLogS) > 0.25)) {
+            lastLoggedButtons = r.buttons;
+            lastButtonLogS = displayS;
+            dk64vr_logf("input: n64 buttons %04X stick %.2f %.2f", r.buttons, r.stickX, r.stickY);
+        }
+    }
+
+    void applyTurn(float deg) {
+        // Rotates the game camera's heading (the camera patch takes it through recomp_vr_take_turn,
+        // dk64vr_control.h) by the step; the eye camera follows
+        // the game camera, so the world turns about Donkey Kong with no smooth swing.
+        turnRemainder += deg;
+        const int whole = int(turnRemainder);
+        turnRemainder -= float(whole);
+        if (whole != 0) {
+            dk64vr_request_turn(whole);
+        }
+
+        if (std::fabs(deg) >= 5.0f) {
+            dk64vr_logf("turn: %.0f deg", deg);
+            blinkUntilS = displayS + setting("snap_blink");
+        }
+    }
+
+    void queueControllerButton(uint8_t button, bool down) {
+        SDL_Event event = {};
+        event.type = down ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;
+        event.cbutton.which = 0;
+        event.cbutton.button = button;
+        event.cbutton.state = down ? SDL_PRESSED : SDL_RELEASED;
+        recompui::queue_event(event);
+    }
+
+    // recompui's menus read SDL controller events; the buttons are the ones recompinput's default
+    // profile binds to each menu action (accept A, back X, apply Y, toggle Back, tabs shoulders).
+    void sendNav(uint32_t held) {
+        static const struct { uint32_t bit; uint8_t button; } map[] = {
+            { nav::Up, SDL_CONTROLLER_BUTTON_DPAD_UP },
+            { nav::Down, SDL_CONTROLLER_BUTTON_DPAD_DOWN },
+            { nav::Left, SDL_CONTROLLER_BUTTON_DPAD_LEFT },
+            { nav::Right, SDL_CONTROLLER_BUTTON_DPAD_RIGHT },
+            { nav::Accept, SDL_CONTROLLER_BUTTON_A },
+            { nav::Back, SDL_CONTROLLER_BUTTON_X },
+            { nav::Apply, SDL_CONTROLLER_BUTTON_Y },
+            { nav::TabLeft, SDL_CONTROLLER_BUTTON_LEFTSHOULDER },
+            { nav::TabRight, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER },
+            { nav::ToggleMenu, SDL_CONTROLLER_BUTTON_BACK },
+        };
+
+        const uint32_t changed = held ^ navHeldLast;
+        for (const auto &m : map) {
+            if (changed & m.bit) {
+                queueControllerButton(m.button, (held & m.bit) != 0);
+            }
+        }
+
+        if ((held & nav::ToggleMenu) && !(navHeldLast & nav::ToggleMenu)) {
+            // recompui handles its events only while it draws, and it draws only into the panel:
+            // show the panel for a moment so the toggle is seen.
+            uiRequestUntilS = monotonicSeconds() + 1.0;
+            dk64vr_logf("input: View pressed: recomp menu toggle");
+        }
+
+        navHeldLast = held;
+    }
+
+    Pose panelPose() const {
+        return poseMul(origin, Pose { Quat(), { 0.0f, 0.0f, -float(setting("panel_distance")) } });
+    }
+
+    // The menu pointer: the dominant hand's aim ray (aim/pose -Z, lesson 41) against the panel.
+    void updatePointer(const InputSample &s) {
+        pointer.visible = false;
+        const int hand = dominantHand();
+        Pose aim;
+        if (!s.valid || !panelShownLast || !uiMouse || !input.aimPose(hand, aim) || (panelChain.width == 0)) {
+            if (pointerDown) {
+                pointerDown = false;
+                queueMouseButton(false);
+            }
+
+            return;
+        }
+
+        const Pose panel = panelPose();
+        const float width = float(setting("panel_width"));
+        const float height = width * float(panelChain.height) / float(panelChain.width);
+        const Quat inv = quatConj(panel.q);
+        const Vec3 rel = { aim.p.x - panel.p.x, aim.p.y - panel.p.y, aim.p.z - panel.p.z };
+        const Vec3 o = quatRotate(inv, rel);
+        const Vec3 d = quatRotate(inv, quatRotate(aim.q, Vec3 { 0.0f, 0.0f, -1.0f }));
+        pointer.origin = aim.p;
+        pointer.dir = quatRotate(aim.q, Vec3 { 0.0f, 0.0f, -1.0f });
+        if (d.z >= -1e-4f) {
+            return;
+        }
+
+        const float t = -o.z / d.z;
+        const float hx = o.x + t * d.x, hy = o.y + t * d.y;
+        if ((t <= 0.0f) || (std::fabs(hx) > 0.5f * width) || (std::fabs(hy) > 0.5f * height)) {
+            return;
+        }
+
+        pointer.visible = true;
+        pointer.length = t;
+        pointer.hit = { aim.p.x + t * pointer.dir.x, aim.p.y + t * pointer.dir.y, aim.p.z + t * pointer.dir.z };
+        pointer.surface = panel;
+        const float u = hx / width + 0.5f, v = 0.5f - hy / height;
+        const int px = int(u * float(panelChain.width)), py = int(v * float(panelChain.height));
+        if ((px != pointerPx) || (py != pointerPy)) {
+            pointerPx = px;
+            pointerPy = py;
+            SDL_Event event = {};
+            event.type = SDL_MOUSEMOTION;
+            event.motion.x = px;
+            event.motion.y = py;
+            recompui::queue_event(event);
+        }
+
+        const float trigger = (hand == 0) ? s.lTrigger : s.rTrigger;
+        const bool down = triggerClick(pointerDown, trigger);
+        if (down != pointerDown) {
+            pointerDown = down;
+            queueMouseButton(down);
+            if (down) {
+                sfvr_haptic_event(&input.haptics, hand, SFVR_HAPTIC_UI_CLICK);
+            }
+        }
+
+        // Right stick Y scrolls (standard.md section 3).
+        const float ry = s.rStick[1];
+        if ((std::fabs(ry) > 0.5f) && (displayS >= nextScrollS)) {
+            nextScrollS = displayS + 0.12;
+            SDL_Event event = {};
+            event.type = SDL_MOUSEWHEEL;
+            event.wheel.y = (ry > 0.0f) ? 1 : -1;
+            recompui::queue_event(event);
+        }
+    }
+
+    void queueMouseButton(bool down) {
+        SDL_Event event = {};
+        event.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+        event.button.button = SDL_BUTTON_LEFT;
+        event.button.state = down ? SDL_PRESSED : SDL_RELEASED;
+        event.button.clicks = 1;
+        event.button.x = pointerPx;
+        event.button.y = pointerPy;
+        recompui::queue_event(event);
     }
 
     // ----------------------------------------------------------------------------------------
@@ -1337,6 +1638,7 @@ private:
     std::filesystem::path dataDir;
     bool installed = false;
     bool haveRefreshRate = false;
+    bool haveFrameProfile = false;
     XrInstance instance = XR_NULL_HANDLE;
     XrSystemId systemId = XR_NULL_SYSTEM_ID;
     PFN_xrGetVulkanGraphicsRequirements2KHR getGraphicsRequirements = nullptr;
@@ -1426,6 +1728,36 @@ private:
     bool autostartBegun = false;
     double gameplaySinceS = 0.0;
 
+    XrInput input;
+    InputMapper mapper;
+    std::mutex inputMutex;
+    InputResult latestInput;
+    std::atomic<bool> focused = false;
+    std::atomic<bool> rumbleOn = false;
+    bool gamePaused = false;
+    bool inputLogged = false;
+    uint16_t lastLoggedButtons = 0;
+    double lastButtonLogS = 0.0;
+    double nextRumbleS = 0.0;
+    double nextScrollS = 0.0;
+    uint32_t navHeldLast = 0;
+    bool uiCapturing = false;
+    bool uiMouse = false;
+    double uiRequestUntilS = 0.0;
+    bool panelShownLast = false;
+    bool cinemaActive = false;
+    Quat headInOriginQ;
+    float turnRemainder = 0.0f;
+    double blinkUntilS = 0.0;
+    struct PointerState {
+        bool visible = false;
+        Vec3 origin, dir, hit;
+        float length = 0.0f;
+        Pose surface;
+    } pointer;
+    bool pointerDown = false;
+    int pointerPx = -1, pointerPy = -1;
+
     bool waitFailed = false, beginFailed = false, endFailed = false, panelFailed = false, acquireFailed = false;
     bool fovFallback = false, ipdFallback = false, ipdLogged = false;
 };
@@ -1459,10 +1791,14 @@ void hostShutdown() {
 }
 
 void hostFilterInput(int player, uint16_t *buttons, float *x, float *y) {
-    (void)x;
-    (void)y;
     if (host != nullptr) {
-        host->filterInput(player, buttons);
+        host->filterInput(player, buttons, x, y);
+    }
+}
+
+void hostSetRumble(int channel, bool on) {
+    if (host != nullptr) {
+        host->setRumble(channel, on);
     }
 }
 

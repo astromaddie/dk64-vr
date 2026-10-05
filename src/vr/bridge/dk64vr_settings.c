@@ -8,11 +8,34 @@
 #include "dk64vr_settings.h"
 #include "dk64vr_log.h"
 
+static const char *const right_stick_values[] = { "turn", "camera", NULL };
+static const char *const cutscene_values[] = { "cinema", "immersive", "panel", NULL };
+
 // Keys that only this port has. The standard keys live in the sfvr registry.
 static const sfvr_setting_key port_keys[] = {
-	// Game units per metre. A placeholder until the logged extent of the player model
-	// ([vr] player extent ...) settles it; docs/VR_ARCHITECTURE.md section 5.
-	{ "world_scale", SFVR_SETTING_FLOAT, 25.0, 5.0, 100.0, NULL },
+	// Game units per metre. Donkey Kong's model spans 25.2 units ([vr] player extent, DK Isles),
+	// so 15 makes him about 1.7 m tall; docs/VR_ARCHITECTURE.md section 5.
+	{ "world_scale", SFVR_SETTING_FLOAT, 15.0, 5.0, 100.0, NULL },
+	// Schema of this port's keys: 2 moved world_scale 25 -> 15, resolution_scale 1.25 -> 1.0
+	// and refresh_rate 120 -> 72 (files still holding the old defaults are migrated once).
+	{ "port_schema", SFVR_SETTING_INT, 2.0, 0.0, 100.0, NULL },
+	// Right stick X: a comfort turn (turn_mode, snap_angle: turns the game camera's heading at
+	// once) or the game's own C-left/C-right camera swing.
+	{ "right_stick_x", SFVR_SETTING_ENUM, 0.0, 0.0, 1.0, right_stick_values },
+	// The left stick moves relative to where you look (move_relative: head or a hand) instead
+	// of relative to the game camera.
+	{ "move_from_view", SFVR_SETTING_BOOL, 1.0, 0.0, 1.0, NULL },
+	// Black for this long after a snap turn, hiding the game camera settling on its new
+	// heading. 0 = no blink.
+	{ "snap_blink", SFVR_SETTING_FLOAT, 0.15, 0.0, 0.5, NULL },
+	// Cutscenes and scripted cameras: a 3D cinema screen (standard.md section 4), the head in
+	// the game's camera (immersive), or the flat panel.
+	{ "cutscenes", SFVR_SETTING_ENUM, 0.0, 0.0, 2.0, cutscene_values },
+	{ "cinema_distance", SFVR_SETTING_FLOAT, 3.0, 1.5, 10.0, NULL },
+	{ "cinema_width", SFVR_SETTING_FLOAT, 3.6, 1.0, 10.0, NULL },
+	// Stereo depth of the cinema: on-screen separation of a point at infinity as a fraction of
+	// the eye distance. The scene sits behind the screen plane (lesson 82). 0 = flat.
+	{ "cinema_depth", SFVR_SETTING_FLOAT, 0.6, 0.0, 1.0, NULL },
 	// Drop the game camera's pitch and roll: level in the headset is level in the game, and
 	// the head supplies pitch.
 	{ "level_pitch", SFVR_SETTING_BOOL, 1.0, 0.0, 1.0, NULL },
@@ -42,9 +65,15 @@ static const sfvr_setting_key port_keys[] = {
 
 // Standard keys whose default this port sets differently from the sfvr registry: the
 // display target of standard.md section 9 (120 Hz, about 2160 px an eye).
+// resolution_scale stays 1.0 (1728 an eye): 2160 an eye was GPU-bound at 36 fps on the
+// device (docs/VR_ARCHITECTURE.md section 5b), the standard's heavy-port exception until the
+// performance work. refresh_rate 72: the rate this port holds; the Frame takes the per-app
+// rate anyway (standard.md section 9). The HUD sits nearer than the standard's 2 m default,
+// in front of anything it overlaps (lesson 2).
 static const struct { const char *name; double def; } port_defaults[] = {
-	{ "refresh_rate", 120.0 },
-	{ "resolution_scale", 1.25 },
+	{ "refresh_rate", 72.0 },
+	{ "resolution_scale", 1.0 },
+	{ "hud_distance", 1.5 },
 };
 #define PORT_DEFAULT_COUNT (sizeof(port_defaults) / sizeof(port_defaults[0]))
 
@@ -411,6 +440,26 @@ int dk64vr_settings_parse(dk64vr_settings_t *s, const char *text, size_t len) {
 		if (!p.seen[i]) {
 			p.repairs++;
 		}
+	}
+
+	// Port schema migration (lesson 79): a file written before schema 2 that still holds an old
+	// default takes the new one; a value the user chose stays.
+	int schema_index = dk64vr_settings_index("port_schema");
+	if (len > 0 && schema_index >= 0 && (!p.seen[schema_index] || s->file_values[schema_index] < 2.0)) {
+		static const struct { const char *name; double from; double to; } moved[] = {
+			{ "world_scale", 25.0, 15.0 },
+			{ "resolution_scale", 1.25, 1.0 },
+			{ "refresh_rate", 120.0, 72.0 },
+		};
+		for (size_t m = 0; m < sizeof(moved) / sizeof(moved[0]); m++) {
+			int index = dk64vr_settings_index(moved[m].name);
+			if (index >= 0 && p.seen[index] && fabs(s->file_values[index] - moved[m].from) < 1e-6) {
+				s->file_values[index] = moved[m].to;
+				dk64vr_logf("settings: %s %g -> %g (new default)", moved[m].name, moved[m].from, moved[m].to);
+			}
+		}
+		s->file_values[schema_index] = 2.0;
+		p.repairs++;
 	}
 	if (s->file_version < SFVR_SETTINGS_SCHEMA) {
 		p.repairs++;

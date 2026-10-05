@@ -397,10 +397,15 @@ if (DK64_VR)
         ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_sched.cpp
         ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_settings.c
         ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_log.c
+        ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_input.cpp
         ${CMAKE_SOURCE_DIR}/src/vr/xr/xr_host.cpp
+        ${CMAKE_SOURCE_DIR}/src/vr/xr/xr_input.cpp
         ${CMAKE_SOURCE_DIR}/src/vr/diag/dk64vr_diag.cpp
         ${CMAKE_SOURCE_DIR}/third_party/sfvr/src/sfvr_settings.c
         ${CMAKE_SOURCE_DIR}/third_party/sfvr/src/sfvr_perf.c
+        ${CMAKE_SOURCE_DIR}/third_party/sfvr/src/sfvr_view.c
+        ${CMAKE_SOURCE_DIR}/third_party/sfvr/src/sfvr_turn.c
+        ${CMAKE_SOURCE_DIR}/third_party/sfvr/src/sfvr_haptics.c
     )
     target_sources(DK64Recompiled PRIVATE ${DK64_VR_SOURCES})
     # VR code builds with warnings on, whatever the rest of the project uses (lesson 30).

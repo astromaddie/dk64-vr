@@ -12,7 +12,11 @@ add_executable(dk64vr_tests
     ${DK64VR_ROOT}/src/vr/bridge/dk64vr_sched.cpp
     ${DK64VR_ROOT}/src/vr/bridge/dk64vr_settings.c
     ${DK64VR_ROOT}/src/vr/bridge/dk64vr_log.c
-    ${DK64VR_ROOT}/third_party/sfvr/src/sfvr_settings.c)
+    ${DK64VR_ROOT}/src/vr/bridge/dk64vr_input.cpp
+    ${DK64VR_ROOT}/third_party/sfvr/src/sfvr_settings.c
+    ${DK64VR_ROOT}/third_party/sfvr/src/sfvr_view.c
+    ${DK64VR_ROOT}/third_party/sfvr/src/sfvr_turn.c
+    ${DK64VR_ROOT}/third_party/sfvr/src/sfvr_haptics.c)
 target_include_directories(dk64vr_tests PRIVATE ${DK64VR_ROOT}/src/vr/bridge ${DK64VR_ROOT}/third_party/sfvr/include)
 target_compile_options(dk64vr_tests PRIVATE -Wall -Wextra -ffp-contract=off)
 target_link_libraries(dk64vr_tests PRIVATE m)

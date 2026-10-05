@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "dk64vr_input.h"
 #include "dk64vr_math.h"
 #include "dk64vr_sched.h"
 #include "dk64vr_settings.h"
@@ -380,9 +381,14 @@ static void testSettings() {
     dk64vr_settings_t s;
     std::memset(&s, 0, sizeof(s));
     dk64vr_settings_defaults(&s);
-    CHECK_NEAR(dk64vr_settings_get(&s, "refresh_rate"), 120.0, 0.0);
-    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), 1.25, 1e-9);
-    CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 25.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "refresh_rate"), 72.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), 1.0, 1e-9);
+    CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 15.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.5, 1e-9);
+    CHECK_NEAR(dk64vr_settings_get(&s, "turn_mode"), 0.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 30.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "right_stick_x"), 0.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "cutscenes"), 0.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "level_pitch"), 1.0, 0.0);
 
     // A file with a clamped value, a bad value, an unknown key and a comment.
@@ -399,7 +405,7 @@ static void testSettings() {
     CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 100.0, 0.0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("timing")], 0.0, 0.0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("dump_frame")], 600.0, 0.0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.25, 1e-9);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.0, 1e-9);
 
     // Round trip: what format() writes parses back to the same values with nothing to repair.
     size_t len = 0;
@@ -430,8 +436,322 @@ static void testSettings() {
     // the environment never reaches the file
     CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 100.0, 0.0);
     CHECK(dk64vr_settings_count() <= DK64VR_SETTINGS_MAX_KEYS);
+
+    // Schema 2 migration (lesson 79): old defaults in a schema-1 file move to the new ones once,
+    // values the user chose stay, and a schema-2 file is left alone.
+    const char *old =
+        "version = 1\n"
+        "[vr]\n"
+        "world_scale = 25\n"
+        "resolution_scale = 1.25\n"
+        "refresh_rate = 90\n";
+    CHECK(dk64vr_settings_parse(&s, old, std::strlen(old)) > 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 15.0, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.0, 1e-9);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("refresh_rate")], 90.0, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("port_schema")], 2.0, 0.0);
+    const char *chosen =
+        "version = 1\n"
+        "[vr]\n"
+        "port_schema = 2\n"
+        "world_scale = 25\n";
+    dk64vr_settings_parse(&s, chosen, std::strlen(chosen));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 25.0, 0.0);
+    // Enum keys by name.
+    const char *names =
+        "[vr]\n"
+        "right_stick_x = camera\n"
+        "cutscenes = panel\n";
+    dk64vr_settings_parse(&s, names, std::strlen(names));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("right_stick_x")], 1.0, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("cutscenes")], 2.0, 0.0);
     dk64vr_settings_free(&s);
     dk64vr_log_set_sink(nullptr);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Input: action names, bindings, the N64 map and the merge
+
+static void testActionNamesUnique() {
+    // Lesson 35: a duplicate name or localized name fails xrCreateAction and nothing attaches.
+    for (int i = 0; i < ActCount; i++) {
+        const ActionDef &a = actionDef(i);
+        CHECK(std::strlen(a.name) > 0 && std::strlen(a.name) < 64);
+        CHECK(std::strlen(a.localized) > 0 && std::strlen(a.localized) < 128);
+        for (const char *c = a.name; *c; c++) {
+            CHECK((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '_' || *c == '-' || *c == '.');
+        }
+        for (int j = i + 1; j < ActCount; j++) {
+            CHECK(std::strcmp(a.name, actionDef(j).name) != 0);
+            CHECK(std::strcmp(a.localized, actionDef(j).localized) != 0);
+        }
+    }
+}
+
+// Component lists (OpenXR spec; Valve's Frame profile as Halo CE VR, F-Zero X VR and GoldenEye VR
+// bind it, goldeneye-vr/tools/steam_frame/tests/check_bindings.py).
+struct ProfileComponents {
+    const char *profile;
+    std::vector<std::string> components;
+};
+
+static std::vector<ProfileComponents> knownProfiles() {
+    const std::vector<std::string> poses = { "input/grip/pose", "input/aim/pose", "output/haptic" };
+    const std::vector<std::string> stick = { "input/thumbstick", "input/thumbstick/x", "input/thumbstick/y", "input/thumbstick/click", "input/thumbstick/touch" };
+    auto join = [](std::vector<std::string> a, const std::vector<std::string> &b) { a.insert(a.end(), b.begin(), b.end()); return a; };
+    std::vector<ProfileComponents> list;
+    list.push_back({ "/interaction_profiles/valve/frame_controller_valve", join(join({ "input/a/click", "input/b/click", "input/x/click", "input/y/click", "input/menu/click",
+        "input/view/click", "input/bumper/click", "input/trigger/value", "input/trigger/click", "input/squeeze/value", "input/dpad_up/click", "input/dpad_down/click",
+        "input/dpad_left/click", "input/dpad_right/click" }, stick), poses) });
+    list.push_back({ "/interaction_profiles/valve/index_controller", join(join({ "input/system/click", "input/system/touch", "input/a/click", "input/a/touch", "input/b/click",
+        "input/b/touch", "input/squeeze/value", "input/squeeze/force", "input/trigger/click", "input/trigger/value", "input/trigger/touch", "input/trackpad",
+        "input/trackpad/x", "input/trackpad/y", "input/trackpad/touch", "input/trackpad/force" }, stick), poses) });
+    list.push_back({ "/interaction_profiles/oculus/touch_controller", join(join({ "input/x/click", "input/x/touch", "input/y/click", "input/y/touch", "input/menu/click",
+        "input/a/click", "input/a/touch", "input/b/click", "input/b/touch", "input/squeeze/value", "input/trigger/value", "input/trigger/touch",
+        "input/thumbrest/touch" }, stick), poses) });
+    return list;
+}
+
+static bool hasComponent(const ProfileComponents &p, const std::string &hand, const std::string &component) {
+    // Touch's Menu is on the left only (the right one is the system button); x/y left, a/b right.
+    if (std::strstr(p.profile, "touch_controller")) {
+        if (component == "input/menu/click" || component == "input/x/click" || component == "input/y/click") {
+            if (hand != "left") return false;
+        }
+        if (component == "input/a/click" || component == "input/b/click") {
+            if (hand != "right") return false;
+        }
+    }
+    for (const std::string &c : p.components) {
+        if (c == component) return true;
+    }
+    return false;
+}
+
+static void testBindingPaths() {
+    // Lesson 33: one path a profile lacks makes the runtime refuse the whole profile.
+    const std::vector<ProfileComponents> known = knownProfiles();
+    CHECK(profileCount() == 3);
+    CHECK(std::strcmp(profileAt(0).profile, "/interaction_profiles/valve/frame_controller_valve") == 0);
+    CHECK(profileAt(0).needsFrameExtension);
+    for (int i = 0; i < profileCount(); i++) {
+        const ProfileBindings &pb = profileAt(i);
+        const ProfileComponents *comps = nullptr;
+        for (const ProfileComponents &k : known) {
+            if (std::strcmp(k.profile, pb.profile) == 0) comps = &k;
+        }
+        CHECK(comps != nullptr);
+        if (comps == nullptr) continue;
+        bool bound[ActCount] = {};
+        for (int b = 0; b < pb.count; b++) {
+            const std::string path = pb.bindings[b].path;
+            const std::string prefix = "/user/hand/";
+            CHECK(path.rfind(prefix, 0) == 0);
+            const size_t slash = path.find('/', prefix.size());
+            const std::string hand = path.substr(prefix.size(), slash - prefix.size());
+            const std::string component = path.substr(slash + 1);
+            CHECK(hand == "left" || hand == "right");
+            const bool ok = hasComponent(*comps, hand, component);
+            if (!ok) std::printf("  %s: %s is not a component\n", pb.profile, path.c_str());
+            CHECK(ok);
+            // Kinds: poses on pose actions, haptics on haptic actions, vectors on the stick.
+            const ActionKind kind = actionDef(pb.bindings[b].action).kind;
+            CHECK((kind == ActionKind::Pose) == (component.find("/pose") != std::string::npos));
+            CHECK((kind == ActionKind::Haptic) == (component == "output/haptic"));
+            CHECK((kind == ActionKind::Vector2) == (component == "input/thumbstick"));
+            CHECK(!bound[pb.bindings[b].action] || kind == ActionKind::Pose);
+            bound[pb.bindings[b].action] = true;
+        }
+        // Every gameplay and system-layer action is reachable on every profile (standard section 2).
+        const int needed[] = { ActA, ActX, ActMenu, ActView, ActLBumper, ActRBumper, ActLTrigger, ActRTrigger, ActLStick, ActRStick, ActAimLeft, ActAimRight, ActHapticLeft, ActHapticRight };
+        for (int a : needed) {
+            if (!bound[a]) std::printf("  %s does not bind %s\n", pb.profile, actionDef(a).name);
+            CHECK(bound[a]);
+        }
+        if (i == 0) {
+            for (int a = 0; a < ActCount; a++) {
+                if (!bound[a]) std::printf("  the Frame profile does not bind %s\n", actionDef(a).name);
+                CHECK(bound[a]);
+            }
+        }
+    }
+    // The Frame is asymmetric: these must be on the hand the Frame has them on.
+    const ProfileBindings &frame = profileAt(0);
+    for (int b = 0; b < frame.count; b++) {
+        const std::string path = frame.bindings[b].path;
+        const bool left = path.find("/user/hand/left/") == 0;
+        const int a = frame.bindings[b].action;
+        if (a == ActA || a == ActB || a == ActX || a == ActY || a == ActMenu) CHECK(!left);
+        if (a == ActView || a == ActDpadUp || a == ActDpadDown || a == ActDpadLeft || a == ActDpadRight) CHECK(left);
+    }
+}
+
+static InputSample sampleIdle() {
+    InputSample s;
+    s.valid = true;
+    return s;
+}
+
+static void testN64Map() {
+    InputMapper m;
+    InputConfig config;
+    InputContext context;
+    context.stereoPlay = true;
+    InputSample s = sampleIdle();
+    s.a = s.x = s.y = s.b = s.menu = s.lBumper = s.rBumper = s.rStickClick = true;
+    s.dpadUp = s.dpadLeft = true;
+    s.lTrigger = 0.9f;
+    s.rTrigger = 0.9f;
+    InputResult r = m.update(s, config, context, 1.0, 1.0f / 72.0f);
+    // DK64 Recompiled's defaults on an Xbox-layout pad (src/game/config.cpp set_control_defaults).
+    CHECK(r.buttons == (n64::A | n64::B | n64::CLeft | n64::CRight | n64::Start | n64::CDown | n64::CUp | n64::L | n64::DUp | n64::DLeft | n64::Z | n64::R));
+    // Trigger hysteresis: 0.4 keeps Z held, 0.3 releases it, 0.45 does not re-press.
+    s = sampleIdle();
+    s.lTrigger = 0.4f;
+    r = m.update(s, config, context, 1.02, 1.0f / 72.0f);
+    CHECK((r.buttons & n64::Z) != 0);
+    s.lTrigger = 0.3f;
+    r = m.update(s, config, context, 1.04, 1.0f / 72.0f);
+    CHECK((r.buttons & n64::Z) == 0);
+    s.lTrigger = 0.45f;
+    r = m.update(s, config, context, 1.06, 1.0f / 72.0f);
+    CHECK((r.buttons & n64::Z) == 0);
+    // Right stick Y does nothing in VR (lesson 80).
+    s = sampleIdle();
+    s.rStick[1] = 1.0f;
+    r = m.update(s, config, context, 1.1, 1.0f / 72.0f);
+    CHECK(r.buttons == 0 && r.turnDeg == 0.0f);
+    // Focus lost: everything released.
+    s = sampleIdle();
+    s.a = true;
+    s.valid = false;
+    r = m.update(s, config, context, 1.2, 1.0f / 72.0f);
+    CHECK(r.buttons == 0 && r.stickX == 0.0f && r.stickY == 0.0f);
+}
+
+static void testStickRelativeToView() {
+    InputMapper m;
+    InputConfig config;
+    InputContext context;
+    context.stereoPlay = true;
+    context.viewYawRad = 3.1415926f / 2.0f;  // looking 90 degrees left of the game camera
+    InputSample s = sampleIdle();
+    s.lStick[1] = 1.0f;  // forward
+    InputResult r = m.update(s, config, context, 1.0, 0.014f);
+    CHECK_NEAR(r.stickX, -1.0, 1e-5);  // forward where the head looks: left of the camera
+    CHECK_NEAR(r.stickY, 0.0, 1e-5);
+    // Not in stereo play (a panel scene) or with the setting off: the raw stick.
+    context.stereoPlay = false;
+    r = m.update(s, config, context, 1.1, 0.014f);
+    CHECK_NEAR(r.stickY, 1.0, 1e-5);
+    context.stereoPlay = true;
+    config.moveFromView = false;
+    r = m.update(s, config, context, 1.2, 0.014f);
+    CHECK_NEAR(r.stickY, 1.0, 1e-5);
+    // Deadzone.
+    s.lStick[0] = 0.1f;
+    s.lStick[1] = 0.05f;
+    r = m.update(s, config, context, 1.3, 0.014f);
+    CHECK(r.stickX == 0.0f && r.stickY == 0.0f);
+    float x = 1.0f, y = 0.0f;
+    rotateStick(3.1415926f / 2.0f, x, y);
+    CHECK_NEAR(x, 0.0, 1e-5);
+    CHECK_NEAR(y, 1.0, 1e-5);
+}
+
+static void testTurnAndView() {
+    InputMapper m;
+    InputConfig config;
+    InputContext context;
+    context.stereoPlay = true;
+    InputSample s = sampleIdle();
+    double t = 1.0;
+    // Snap: one step per flick, re-armed under 0.3.
+    s.rStick[0] = 0.9f;
+    CHECK_NEAR(m.update(s, config, context, t += 0.014, 0.014f).turnDeg, 30.0, 1e-5);
+    CHECK_NEAR(m.update(s, config, context, t += 0.014, 0.014f).turnDeg, 0.0, 1e-5);
+    s.rStick[0] = 0.1f;
+    m.update(s, config, context, t += 0.014, 0.014f);
+    s.rStick[0] = -0.9f;
+    CHECK_NEAR(m.update(s, config, context, t += 0.014, 0.014f).turnDeg, -30.0, 1e-5);
+    // The game's own camera instead: C-left / C-right.
+    config.rightStickX = RightStickX::GameCamera;
+    InputResult r = m.update(s, config, context, t += 0.014, 0.014f);
+    CHECK(r.buttons == n64::CLeft && r.turnDeg == 0.0f);
+    config.rightStickX = RightStickX::Turn;
+    // No turning outside stereo play.
+    context.stereoPlay = false;
+    s.rStick[0] = 0.0f;
+    m.update(s, config, context, t += 0.014, 0.014f);
+    s.rStick[0] = 0.9f;
+    CHECK(m.update(s, config, context, t += 0.014, 0.014f).turnDeg == 0.0f);
+    // View: a short press toggles the recomp menu (held for two reads); 1 s recentres with a buzz.
+    m.reset();
+    s = sampleIdle();
+    t = 10.0;
+    m.update(s, config, context, t, 0.014f);
+    s.view = true;
+    m.update(s, config, context, t += 0.1, 0.014f);
+    s.view = false;
+    r = m.update(s, config, context, t += 0.1, 0.014f);
+    CHECK((r.navHeld & nav::ToggleMenu) != 0 && !r.recentre);
+    r = m.update(s, config, context, t += 0.014, 0.014f);
+    CHECK((r.navHeld & nav::ToggleMenu) != 0);
+    r = m.update(s, config, context, t += 0.014, 0.014f);
+    CHECK((r.navHeld & nav::ToggleMenu) == 0);
+    s.view = true;
+    m.update(s, config, context, t += 0.014, 0.014f);
+    r = m.update(s, config, context, t += 1.1, 0.014f);
+    CHECK(r.recentre && r.systemBuzz);
+    s.view = false;
+    r = m.update(s, config, context, t += 0.1, 0.014f);
+    CHECK((r.navHeld & nav::ToggleMenu) == 0 && !r.recentre);
+}
+
+static void testMenuNavigation() {
+    InputMapper m;
+    InputConfig config;
+    InputContext context;
+    context.menuOpen = true;
+    InputSample s = sampleIdle();
+    s.a = true;
+    s.lStick[1] = -0.9f;
+    s.rBumper = true;
+    InputResult r = m.update(s, config, context, 1.0, 0.014f);
+    CHECK(r.buttons == 0);  // the game sees nothing while a menu is open
+    CHECK(r.navHeld == (nav::Accept | nav::Down | nav::TabRight));
+    s = sampleIdle();
+    s.b = true;
+    s.dpadLeft = true;
+    r = m.update(s, config, context, 1.1, 0.014f);
+    CHECK(r.navHeld == (nav::Back | nav::Left));
+}
+
+static void testMerge() {
+    InputResult vr;
+    vr.buttons = n64::A;
+    vr.stickX = 0.5f;
+    vr.stickY = 0.0f;
+    uint16_t buttons = n64::B;
+    float x = 0.0f, y = 0.2f;
+    mergeN64(buttons, x, y, vr);
+    CHECK(buttons == (n64::A | n64::B));
+    CHECK_NEAR(x, 0.5, 1e-6);
+    CHECK_NEAR(y, 0.0, 1e-6);
+    // A real stick pushed further wins.
+    x = 0.0f;
+    y = -0.9f;
+    mergeN64(buttons, x, y, vr);
+    CHECK_NEAR(y, -0.9, 1e-6);
+    // An idle VR pad changes nothing.
+    InputResult idle;
+    x = 0.3f;
+    y = 0.1f;
+    buttons = n64::Z;
+    mergeN64(buttons, x, y, idle);
+    CHECK(buttons == n64::Z);
+    CHECK_NEAR(x, 0.3, 1e-6);
+    CHECK(!triggerClick(false, 0.59f) && triggerClick(false, 0.6f) && triggerClick(true, 0.46f) && !triggerClick(true, 0.45f));
 }
 
 int main() {
@@ -452,6 +772,13 @@ int main() {
     testSchedulerStall();
     testSchedulerWeightEdges();
     testSettings();
+    testActionNamesUnique();
+    testBindingPaths();
+    testN64Map();
+    testStickRelativeToView();
+    testTurnAndView();
+    testMenuNavigation();
+    testMerge();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

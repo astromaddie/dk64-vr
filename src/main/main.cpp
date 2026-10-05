@@ -688,6 +688,12 @@ static bool get_n64_input_vr(int player_index, uint16_t* buttons_out, float* x_o
     dk64vr::hostFilterInput(player_index, buttons_out, x_out, y_out);
     return result;
 }
+
+// The game's Rumble Pak motor, to the real pad as before and to the VR controllers' haptics.
+static void set_rumble_vr(int controller_num, bool on) {
+    recompinput::set_rumble(controller_num, on);
+    dk64vr::hostSetRumble(controller_num, on);
+}
 #endif
 
 #define REGISTER_FUNC(name) recomp::overlays::register_base_export(#name, name)
@@ -857,10 +863,11 @@ int main(int argc, char** argv) {
         .poll_input = recompinput::poll_inputs,
 #ifdef DK64_VR
         .get_input = get_n64_input_vr,
+        .set_rumble = set_rumble_vr,
 #else
         .get_input = recompinput::profiles::get_n64_input,
-#endif
         .set_rumble = recompinput::set_rumble,
+#endif
         .get_connected_device_info = get_connected_device_info,
     };
 

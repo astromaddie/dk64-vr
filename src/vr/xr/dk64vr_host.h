@@ -15,7 +15,11 @@ bool hostInstall(const std::filesystem::path &appFolder);
 // From main(), after the renderer has shut down.
 void hostShutdown();
 
-// The game's N64 input callback, for player 1: merges diagnostic input (diag_autostart).
+// The game's N64 input callback, for player 1: OR-merges the VR controllers (and the
+// diagnostics' autostart presses) into the real pad's input.
 void hostFilterInput(int player, uint16_t *buttons, float *x, float *y);
+
+// The game's Rumble Pak motor (ultramodern set_rumble), as controller haptics.
+void hostSetRumble(int channel, bool on);
 
 }

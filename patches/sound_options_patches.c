@@ -3,6 +3,7 @@
 #include "input.h"
 #include "sound.h"
 #include "options.h"
+#include "vr_state.h"
 
 extern s8 D_global_asm_80745840;
 extern s8 D_global_asm_8074583C;
@@ -408,6 +409,17 @@ RECOMP_PATCH void func_global_asm_8061D1FC(Actor* arg0) {
     f32 dRStickX, dRStickY, ratio;
 
     CaaD = arg0->CaaD;
+    // @recomp VR comfort turn: the right stick's snap (or smooth) turn rotates the camera's
+    // heading (unkB2, 4096 per turn; larger = the view turns left) at once, the way the analog
+    // camera below does, instead of the C-button swing.
+    if (recomp_vr_is_active() && (CaaD->unkFB == 0)) {
+        s32 vr_turn = recomp_vr_take_turn();
+        if ((vr_turn != 0) && (CaaD->unkF3 != 2)) {
+            CaaD->unkB0 = 0;
+            CaaD->unkB2 = (CaaD->unkB2 - (vr_turn * 4096) / 360) & 0xFFF;
+            CaaD->unkF1 = 1; // Makes things snappy
+        }
+    }
     temp_f2 = D_global_asm_807FD610[CaaD->unkFB].unk2F * 0.5;
     if (!(CaaD->unkAC & 0x2000) && !(D_global_asm_807FBB64 & 0x40)) {
         if ((CaaD->unk8) && ((s32) CaaD->unk8 < 0x9B) && (CaaD->unkEF)) {
