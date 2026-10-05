@@ -163,6 +163,7 @@ public:
             haveVulkan2 = haveVulkan2 || (strcmp(e.extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME) == 0);
             haveRefreshRate = haveRefreshRate || (strcmp(e.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0);
             haveFrameProfile = haveFrameProfile || (strcmp(e.extensionName, "XR_VALVE_frame_controller_interaction") == 0);
+            haveVisibilityMask = haveVisibilityMask || (strcmp(e.extensionName, XR_KHR_VISIBILITY_MASK_EXTENSION_NAME) == 0);
         }
 
         if (!haveVulkan2) {
@@ -178,6 +179,11 @@ public:
         // The Steam Frame's controller profile, bound first when offered (standard.md section 2).
         if (haveFrameProfile) {
             enabled.push_back("XR_VALVE_frame_controller_interaction");
+        }
+
+        // The hidden-area mesh, masked out of the eye passes before their scene (lesson 51).
+        if (haveVisibilityMask) {
+            enabled.push_back(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
         }
 
         XrInstanceCreateInfo createInfo = { XR_TYPE_INSTANCE_CREATE_INFO };
@@ -215,6 +221,10 @@ public:
         getProc("xrCreateVulkanInstanceKHR", createVulkanInstance);
         getProc("xrGetVulkanGraphicsDevice2KHR", getVulkanGraphicsDevice);
         getProc("xrCreateVulkanDeviceKHR", createVulkanDevice);
+        if (haveVisibilityMask) {
+            getProc("xrGetVisibilityMaskKHR", getVisibilityMask);
+        }
+
         if (haveRefreshRate) {
             getProc("xrEnumerateDisplayRefreshRatesFB", enumerateRefreshRates);
             getProc("xrGetDisplayRefreshRateFB", getRefreshRate);
@@ -604,6 +614,63 @@ public:
         *width = chain.width;
         *height = chain.height;
         return chain.framebuffers[chain.index].get();
+    }
+
+    uint32_t hiddenMesh(uint32_t eye, const float **ndcXY) override {
+        // Only for eye images that span the headset's FOV (not the cinema's screen views).
+        static const bool enabled = envFlag("RT64_VR_HIDDEN_MASK", true);
+        if (!enabled || (eye > 1) || (getVisibilityMask == nullptr) || (session == XR_NULL_HANDLE) || cinemaActive || (frameMode != RT64::VrFrame::Mode::Stereo)) {
+            return 0;
+        }
+
+        if (!hiddenMeshValid[eye]) {
+            hiddenMeshValid[eye] = true;
+            hiddenTangents[eye].clear();
+            hiddenNdc[eye].clear();
+            XrVisibilityMaskKHR mask = { XR_TYPE_VISIBILITY_MASK_KHR };
+            XrResult res = getVisibilityMask(session, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &mask);
+            if (XR_SUCCEEDED(res) && (mask.vertexCountOutput > 0) && (mask.indexCountOutput > 0)) {
+                std::vector<XrVector2f> vertices(mask.vertexCountOutput);
+                std::vector<uint32_t> indices(mask.indexCountOutput);
+                mask.vertexCapacityInput = uint32_t(vertices.size());
+                mask.vertices = vertices.data();
+                mask.indexCapacityInput = uint32_t(indices.size());
+                mask.indices = indices.data();
+                res = getVisibilityMask(session, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &mask);
+                if (XR_SUCCEEDED(res)) {
+                    for (uint32_t i = 0; i < mask.indexCountOutput; i++) {
+                        if (indices[i] < mask.vertexCountOutput) {
+                            hiddenTangents[eye].push_back(vertices[indices[i]]);
+                        }
+                    }
+                }
+            }
+
+            if (!hiddenMeshLogged || (eye == 1)) {
+                hiddenMeshLogged = true;
+                dk64vr_logf("hidden-area mesh, eye %u: %zu triangles (%s)", eye, hiddenTangents[eye].size() / 3, xrResultName(instance, res));
+            }
+        }
+
+        if (hiddenTangents[eye].size() < 3) {
+            return 0;
+        }
+
+        // Tangents to the eye image's NDC (y up), for the FOV the eye is rendered with.
+        const FovTangents &fov = eyeFov[eye];
+        const FovTangents &done = hiddenNdcFov[eye];
+        if (hiddenNdc[eye].empty() || (fov.left != done.left) || (fov.right != done.right) || (fov.up != done.up) || (fov.down != done.down)) {
+            hiddenNdcFov[eye] = fov;
+            hiddenNdc[eye].resize(hiddenTangents[eye].size() * 2);
+            for (size_t i = 0; i < hiddenTangents[eye].size(); i++) {
+                const XrVector2f &t = hiddenTangents[eye][i];
+                hiddenNdc[eye][i * 2 + 0] = (2.0f * t.x - (fov.right + fov.left)) / (fov.right - fov.left);
+                hiddenNdc[eye][i * 2 + 1] = (2.0f * t.y - (fov.up + fov.down)) / (fov.up - fov.down);
+            }
+        }
+
+        *ndcXY = hiddenNdc[eye].data();
+        return uint32_t(hiddenTangents[eye].size());
     }
 
     void recordEye(uint32_t eye, plume::RenderCommandList *commandList, plume::RenderTexture *source, uint32_t width, uint32_t height, bool drawn) override {
@@ -1248,6 +1315,9 @@ private:
             case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING:
                 dk64vr_logpf("[openxr]", "instance loss pending");
                 quitOnce("the runtime is going away");
+                break;
+            case XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR:
+                hiddenMeshValid[0] = hiddenMeshValid[1] = false;
                 break;
             case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: {
                 const auto &changed = *reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB *>(&event);
@@ -2238,6 +2308,15 @@ private:
     bool installed = false;
     bool haveRefreshRate = false;
     bool haveFrameProfile = false;
+    bool haveVisibilityMask = false;
+    PFN_xrGetVisibilityMaskKHR getVisibilityMask = nullptr;
+    // The runtime's hidden triangles an eye (view-plane tangents), and the same in the eye image's
+    // normalized device coordinates for the FOV they were last converted with.
+    std::vector<XrVector2f> hiddenTangents[2];
+    std::vector<float> hiddenNdc[2];
+    FovTangents hiddenNdcFov[2];
+    bool hiddenMeshValid[2] = {};
+    bool hiddenMeshLogged = false;
     XrInstance instance = XR_NULL_HANDLE;
     XrSystemId systemId = XR_NULL_SYSTEM_ID;
     PFN_xrGetVulkanGraphicsRequirements2KHR getGraphicsRequirements = nullptr;

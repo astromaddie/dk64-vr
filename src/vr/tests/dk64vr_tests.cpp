@@ -383,7 +383,7 @@ static void testSettings() {
     std::memset(&s, 0, sizeof(s));
     dk64vr_settings_defaults(&s);
     CHECK_NEAR(dk64vr_settings_get(&s, "refresh_rate"), 72.0, 0.0);
-    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), 1.0, 1e-9);
+    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), 1.25, 1e-9);
     CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 15.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.5, 1e-9);
     CHECK_NEAR(dk64vr_settings_get(&s, "turn_mode"), 0.0, 0.0);
@@ -406,7 +406,7 @@ static void testSettings() {
     CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 100.0, 0.0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("timing")], 0.0, 0.0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("dump_frame")], 600.0, 0.0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.0, 1e-9);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.25, 1e-9);
 
     // Round trip: what format() writes parses back to the same values with nothing to repair.
     size_t len = 0;
@@ -438,8 +438,9 @@ static void testSettings() {
     CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 100.0, 0.0);
     CHECK(dk64vr_settings_count() <= DK64VR_SETTINGS_MAX_KEYS);
 
-    // Schema 2 migration (lesson 79): old defaults in a schema-1 file move to the new ones once,
-    // values the user chose stay, and a schema-2 file is left alone.
+    // Schema migrations (lesson 79): old defaults in an older file move to the new ones once and
+    // values the user chose stay. resolution_scale went 1.25 -> 1.0 (schema 2) and back to 1.25
+    // (schema 4).
     const char *old =
         "version = 1\n"
         "[vr]\n"
@@ -448,9 +449,24 @@ static void testSettings() {
         "refresh_rate = 90\n";
     CHECK(dk64vr_settings_parse(&s, old, std::strlen(old)) > 0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 15.0, 0.0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.0, 1e-9);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.25, 1e-9);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("refresh_rate")], 90.0, 0.0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("port_schema")], 3.0, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("port_schema")], 4.0, 0.0);
+    // A schema-3 file still at the old default 1.0 moves to 1.25; one the user set to 0.75 stays.
+    const char *schema3 =
+        "version = 1\n"
+        "[vr]\n"
+        "port_schema = 3\n"
+        "resolution_scale = 1.0\n";
+    CHECK(dk64vr_settings_parse(&s, schema3, std::strlen(schema3)) > 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.25, 1e-9);
+    const char *schema3Chosen =
+        "version = 1\n"
+        "[vr]\n"
+        "port_schema = 3\n"
+        "resolution_scale = 0.75\n";
+    dk64vr_settings_parse(&s, schema3Chosen, std::strlen(schema3Chosen));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 0.75, 1e-9);
     const char *chosen =
         "version = 1\n"
         "[vr]\n"

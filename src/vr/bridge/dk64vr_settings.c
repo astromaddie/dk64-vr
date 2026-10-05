@@ -18,8 +18,9 @@ static const sfvr_setting_key port_keys[] = {
 	{ "world_scale", SFVR_SETTING_FLOAT, 15.0, 5.0, 100.0, NULL },
 	// Schema of this port's keys (migrations in dk64vr_settings_parse): 2 moved world_scale 25 -> 15, resolution_scale 1.25 -> 1.0
 	// refresh_rate 120 -> 72 and hud_distance 2 -> 1.5 (files still holding the old defaults are migrated once).
-	// 3 turned snap_blink 0.15 -> 0.
-	{ "port_schema", SFVR_SETTING_INT, 3.0, 0.0, 100.0, NULL },
+	// 3 turned snap_blink 0.15 -> 0. 4 moved resolution_scale 1.0 -> 1.25 (2160 an eye) after the
+	// performance work.
+	{ "port_schema", SFVR_SETTING_INT, 4.0, 0.0, 100.0, NULL },
 	// Right stick X: a comfort turn (turn_mode, snap_angle: turns the game camera's heading at
 	// once) or the game's own C-left/C-right camera swing.
 	{ "right_stick_x", SFVR_SETTING_ENUM, 0.0, 0.0, 1.0, right_stick_values },
@@ -80,14 +81,13 @@ static const sfvr_setting_key port_keys[] = {
 
 // Standard keys whose default this port sets differently from the sfvr registry: the
 // display target of standard.md section 9 (120 Hz, about 2160 px an eye).
-// resolution_scale stays 1.0 (1728 an eye): 2160 an eye was GPU-bound at 36 fps on the
-// device (docs/VR_ARCHITECTURE.md section 5b), the standard's heavy-port exception until the
-// performance work. refresh_rate 72: the rate this port holds; the Frame takes the per-app
-// rate anyway (standard.md section 9). The HUD sits nearer than the standard's 2 m default,
+// resolution_scale 1.25 (2160 an eye): the eye passes take about 6.4 ms of GPU a frame there
+// and hold 72 Hz with no missed frames (docs/VR_ARCHITECTURE.md section 5b). refresh_rate 72:
+// the only rate measured so far; the Frame takes the per-app rate anyway (standard.md section 9). The HUD sits nearer than the standard's 2 m default,
 // in front of anything it overlaps (lesson 2).
 static const struct { const char *name; double def; } port_defaults[] = {
 	{ "refresh_rate", 72.0 },
-	{ "resolution_scale", 1.0 },
+	{ "resolution_scale", 1.25 },
 	{ "hud_distance", 1.5 },
 };
 #define PORT_DEFAULT_COUNT (sizeof(port_defaults) / sizeof(port_defaults[0]))
@@ -460,7 +460,7 @@ int dk64vr_settings_parse(dk64vr_settings_t *s, const char *text, size_t len) {
 	// Port schema migration (lesson 79): a file written before schema 2 that still holds an old
 	// default takes the new one; a value the user chose stays.
 	int schema_index = dk64vr_settings_index("port_schema");
-	if (len > 0 && schema_index >= 0 && (!p.seen[schema_index] || s->file_values[schema_index] < 3.0)) {
+	if (len > 0 && schema_index >= 0 && (!p.seen[schema_index] || s->file_values[schema_index] < 4.0)) {
 		const double from_schema = p.seen[schema_index] ? s->file_values[schema_index] : 1.0;
 		static const struct { const char *name; double from; double to; double schema; } moved[] = {
 			{ "world_scale", 25.0, 15.0, 2.0 },
@@ -468,6 +468,7 @@ int dk64vr_settings_parse(dk64vr_settings_t *s, const char *text, size_t len) {
 			{ "refresh_rate", 120.0, 72.0, 2.0 },
 			{ "hud_distance", 2.0, 1.5, 2.0 },
 			{ "snap_blink", 0.15, 0.0, 3.0 },
+			{ "resolution_scale", 1.0, 1.25, 4.0 },
 		};
 		for (size_t m = 0; m < sizeof(moved) / sizeof(moved[0]); m++) {
 			int index = dk64vr_settings_index(moved[m].name);
@@ -476,7 +477,7 @@ int dk64vr_settings_parse(dk64vr_settings_t *s, const char *text, size_t len) {
 				dk64vr_logf("settings: %s %g -> %g (new default)", moved[m].name, moved[m].from, moved[m].to);
 			}
 		}
-		s->file_values[schema_index] = 3.0;
+		s->file_values[schema_index] = 4.0;
 		p.repairs++;
 	}
 	if (s->file_version < SFVR_SETTINGS_SCHEMA) {
