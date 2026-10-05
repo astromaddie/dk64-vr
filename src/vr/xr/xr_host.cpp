@@ -888,6 +888,8 @@ public:
                     statSum[e][8] += st.testZ;
                     statSum[e][9] += st.clears;
                     statSum[e][10] += st.gpuMs;
+                    statSum[e][11] += st.submitMs;
+                    statSum[e][12] += st.waitMs;
                     statMax[e] = std::max(statMax[e], st.gpuMs + st.gpuCopyMs);
                 }
             }
@@ -901,12 +903,12 @@ public:
                 if (statFrames > 0) {
                     const double n = double(statFrames);
                     auto avg = [&](int e, int k) { return statSum[e][k] / n; };
-                    printf("[vr-perf] eyes gpu=%.2f/%.2f copy=%.2f/%.2f max=%.2f/%.2fms rec=%.2f/%.2fms passes=%.1f/%.1f mpx=%.1f/%.1f draws=%.0f uber=%.0f decal=%.0f dsw=%.1f/%.1f testz=%.1f clears=%.1f\n",
-                        avg(0, 10), avg(1, 10), avg(0, 0), avg(1, 0), statMax[0], statMax[1], avg(0, 1), avg(1, 1), avg(0, 2), avg(1, 2), avg(0, 3), avg(1, 3),
+                    printf("[vr-perf] eyes gpu=%.2f/%.2f copy=%.2f/%.2f max=%.2f/%.2fms rec=%.2f/%.2f submit=%.2f/%.2f wait=%.2f/%.2fms passes=%.1f/%.1f mpx=%.1f/%.1f draws=%.0f uber=%.0f decal=%.0f dsw=%.1f/%.1f testz=%.1f clears=%.1f\n",
+                        avg(0, 10), avg(1, 10), avg(0, 0), avg(1, 0), statMax[0], statMax[1], avg(0, 1), avg(1, 1), avg(0, 11), avg(1, 11), avg(0, 12), avg(1, 12), avg(0, 2), avg(1, 2), avg(0, 3), avg(1, 3),
                         avg(1, 4), avg(1, 5), avg(1, 6), avg(0, 7), avg(1, 7), avg(1, 8), avg(1, 9));
                 }
                 statFrames = 0;
-                std::fill(&statSum[0][0], &statSum[0][0] + 2 * 11, 0.0);
+                std::fill(&statSum[0][0], &statSum[0][0] + 2 * 13, 0.0);
                 statMax[0] = statMax[1] = 0.0;
                 std::fill(std::begin(hudPartChanges), std::end(hudPartChanges), 0u);
                 hudCpuSum = hudGpuSum = 0.0;
@@ -2317,7 +2319,7 @@ private:
     double eyeGpuMs[2] = {};
     RT64::VrEyeStats eyeStats[2];
     uint64_t statFrames = 0;
-    double statSum[2][11] = {};
+    double statSum[2][13] = {};
     double statMax[2] = {};
 
     Pose origin;
