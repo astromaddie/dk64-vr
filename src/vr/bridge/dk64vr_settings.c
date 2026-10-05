@@ -33,7 +33,7 @@ static const sfvr_setting_key port_keys[] = {
 	{ "dump_count", SFVR_SETTING_INT, 1.0, 1.0, 64.0, NULL },
 	{ "dump_interval", SFVR_SETTING_INT, 120.0, 1.0, 100000.0, NULL },
 	{ "diag_yaw_step", SFVR_SETTING_FLOAT, 0.0, -360.0, 360.0, NULL },
-	// Diagnostic: dump the flat panel's image (vr-panel-*.png) at its Nth present. 0 = off.
+	// Diagnostic: dump the flat panel's image (vr-panel-*.png) every Nth present, up to 40. 0 = off.
 	{ "dump_panel_frame", SFVR_SETTING_INT, 0.0, 0.0, 1000000.0, NULL }
 };
 #define PORT_KEY_COUNT (sizeof(port_keys) / sizeof(port_keys[0]))

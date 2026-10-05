@@ -413,7 +413,8 @@ public:
         lastInfo = info;
         const double tick = (info.viOriginalRate > 0) ? (1.0 / double(info.viOriginalRate)) : (1.0 / 30.0);
         const double at = (frameMode != RT64::VrFrame::Mode::None) ? displayS : monotonicSeconds();
-        if (scheduler.arrive(at, tick)) {
+        const double tickBefore = scheduler.tick_s;
+        if (scheduler.arrive(at, tick) && ((scheduler.rebases == 1) || (std::fabs(tickBefore - scheduler.tick_s) > 1e-9) || (setting("timing") != 0.0))) {
             dk64vr_logf("scheduler: anchored at %.1f Hz (rebase %" PRIu64 ", offset %.1f ms)", 1.0 / scheduler.tick_s, scheduler.rebases, scheduler.last_offset_s * 1000.0);
         }
 
@@ -506,16 +507,23 @@ public:
             stereoShown = (frameMode == RT64::VrFrame::Mode::Stereo) && eyesRecorded[0] && eyesRecorded[1];
             if (!stereoShown) {
                 // The probe colours, or black under the panel (lessons 56 and 82: always submit a
-                // projection layer).
+                // projection layer). Black needs drawing only until every image of both eye
+                // swapchains is black; after that the layer shows the last released image.
                 const bool probe = probing;
-                clearEyes(probe ? plume::RenderColor(0.85f, 0.15f, 0.1f, 1.0f) : plume::RenderColor(0.0f, 0.0f, 0.0f, 1.0f),
-                    probe ? plume::RenderColor(0.1f, 0.3f, 0.9f, 1.0f) : plume::RenderColor(0.0f, 0.0f, 0.0f, 1.0f), probe);
+                if (probe || (blackImages < blackNeeded()) || eyeChain[0].acquired || eyeChain[1].acquired) {
+                    clearEyes(probe ? plume::RenderColor(0.85f, 0.15f, 0.1f, 1.0f) : plume::RenderColor(0.0f, 0.0f, 0.0f, 1.0f),
+                        probe ? plume::RenderColor(0.1f, 0.3f, 0.9f, 1.0f) : plume::RenderColor(0.0f, 0.0f, 0.0f, 1.0f), probe);
+                    blackImages = probe ? 0 : (blackImages + 1);
+                }
             }
-            else if (dumpDue) {
-                dumpsDone++;
-                dumpDue = false;
-                nextDumpFrame = stereoFrames + uint64_t(setting("dump_interval"));
-                diagYawDeg += float(setting("diag_yaw_step"));
+            else {
+                blackImages = 0;
+                if (dumpDue) {
+                    dumpsDone++;
+                    dumpDue = false;
+                    nextDumpFrame = stereoFrames + uint64_t(setting("dump_interval"));
+                    diagYawDeg += float(setting("diag_yaw_step"));
+                }
             }
 
             releaseEyes();
@@ -551,6 +559,8 @@ public:
             if (stereoShown) {
                 stereoFrames++;
             }
+
+            panelWanted = !stereoShown;
         }
 
         XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
@@ -576,7 +586,12 @@ public:
             sfvr_perf_add_frame(&perf, nowS, missed ? 1 : 0, stages, eyes, gpu);
             char line[256];
             if (sfvr_perf_poll(&perf, nowS, line, sizeof(line))) {
-                printf("%s mode=%s rate=%.1fHz eye=%ux%u\n", line, stereoShown ? "stereo" : "flat", (periodS > 0.0) ? (1.0 / periodS) : 0.0, eyeChain[0].width, eyeChain[0].height);
+                const double windowS = nowS - perfWindowStartS;
+                printf("%s mode=%s rate=%.1fHz eye=%ux%u game=%.1fHz rebases=%" PRIu64 "\n", line, stereoShown ? "stereo" : "flat", (periodS > 0.0) ? (1.0 / periodS) : 0.0,
+                    eyeChain[0].width, eyeChain[0].height, (windowS > 0.0) ? double(scheduler.arrivals - perfWindowArrivals) / windowS : 0.0, scheduler.rebases - perfWindowRebases);
+                perfWindowStartS = nowS;
+                perfWindowArrivals = scheduler.arrivals;
+                perfWindowRebases = scheduler.rebases;
                 fflush(stdout);
             }
         }
@@ -587,7 +602,9 @@ public:
 
     plume::RenderFramebuffer *panelAcquire(plume::RenderTexture **texture, uint32_t *width, uint32_t *height) override {
         panelMutex.lock();
-        if ((panelChain.handle == XR_NULL_HANDLE) || !sessionRunning) {
+        // Not while the eyes are shown: the panel would cost GPU time and workload-mutex time
+        // for nothing, and the runtime need not free images of a swapchain no layer uses.
+        if ((panelChain.handle == XR_NULL_HANDLE) || !sessionRunning || !panelWanted.load()) {
             panelMutex.unlock();
             return nullptr;
         }
@@ -617,11 +634,12 @@ public:
         }
 
         panelPresents++;
+        // Every dump_panel_frame-th present, up to 40, for a timeline of the flat screens.
         const uint64_t dumpPanel = uint64_t(setting("dump_panel_frame"));
-        if ((dumpPanel > 0) && (panelPresents == dumpPanel) && panelWorker) {
+        if ((dumpPanel > 0) && ((panelPresents % dumpPanel) == 0) && (panelPresents / dumpPanel <= 40) && panelWorker) {
             plume::VulkanTexture *image = panelChain.textures[panelChain.index].get();
             panelWorker->commandList->begin();
-            recordReadback(panelWorker->commandList.get(), image, panelChain, panelReadback, "vr-panel");
+            recordReadback(panelWorker->commandList.get(), image, panelChain, panelReadback, "vr-panel-p" + std::to_string(panelPresents / dumpPanel));
             panelWorker->commandList->barriers(plume::RenderBarrierStage::GRAPHICS, plume::RenderTextureBarrier(image, plume::RenderTextureLayout::COLOR_WRITE));
             panelWorker->commandList->end();
             panelWorker->execute();
@@ -915,6 +933,7 @@ private:
             if (XR_SUCCEEDED(res)) {
                 sessionRunning = true;
                 sessionStartS = monotonicSeconds();
+                perfWindowStartS = sessionStartS;
                 recentrePending = true;
                 scheduler.reset();
                 requestRateOnce();
@@ -1036,7 +1055,18 @@ private:
         // except when it has none at all.
         Pose eyeFromHead[2];
         const Pose headPose = headValid ? fromXr(head.pose) : Pose();
-        if (viewsValid && headValid) {
+        if (synthetic) {
+            // A synthetic head looks straight ahead with level eyes the runtime's distance apart.
+            float ipd = 0.063f;
+            if (viewsValid) {
+                const XrVector3f a = views[0].pose.position, b = views[1].pose.position;
+                ipd = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+            }
+
+            eyeFromHead[0].p = { -0.5f * ipd, 0.0f, 0.0f };
+            eyeFromHead[1].p = { 0.5f * ipd, 0.0f, 0.0f };
+        }
+        else if (viewsValid && headValid) {
             for (uint32_t eye = 0; eye < 2; eye++) {
                 eyeFromHead[eye] = poseMul(poseInverse(headPose), fromXr(views[eye].pose));
             }
@@ -1219,9 +1249,19 @@ private:
 
         readback.bgra = chain.bgra;
         commandList->barriers(plume::RenderBarrierStage::COPY, plume::RenderTextureBarrier(image, plume::RenderTextureLayout::COPY_SOURCE));
-        const plume::RenderFormat format = chain.bgra ? plume::RenderFormat::B8G8R8A8_UNORM : plume::RenderFormat::R8G8B8A8_UNORM;
-        commandList->copyTextureRegion(plume::RenderTextureCopyLocation::PlacedFootprint(readback.buffer.get(), format, chain.width, chain.height, 1, chain.width),
-            plume::RenderTextureCopyLocation::Subresource(image));
+        // plume copies buffers to images only, so the image-to-buffer copy is recorded directly.
+        VkBufferImageCopy region = {};
+        region.bufferRowLength = chain.width;
+        region.bufferImageHeight = chain.height;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { chain.width, chain.height, 1 };
+        vkCmdCopyImageToBuffer(static_cast<plume::VulkanCommandList *>(commandList)->vk, image->vk, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            static_cast<plume::VulkanBuffer *>(readback.buffer.get())->vk, 1, &region);
+        VkMemoryBarrier toHost = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(static_cast<plume::VulkanCommandList *>(commandList)->vk, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
         readback.pending = true;
         char suffix[64];
         snprintf(suffix, sizeof(suffix), "-%03" PRIu64 "-yaw%d.png", dumpsDone, int(std::lround(diagYawDeg)));
@@ -1289,6 +1329,7 @@ private:
     Swapchain panelChain;
     std::mutex panelMutex;
     std::atomic<bool> panelReady = false;
+    std::atomic<bool> panelWanted = true;
     uint64_t panelPresents = 0;
     std::unique_ptr<RT64::RenderWorker> frameWorker;
     std::unique_ptr<RT64::RenderWorker> panelWorker;
@@ -1308,6 +1349,11 @@ private:
     double frameStartS = 0.0;
     double waitDoneS = 0.0;
     bool eyesRecorded[2] = {};
+    uint32_t blackImages = 0;  // consecutive black frames drawn into the eye swapchains
+
+    uint32_t blackNeeded() const {
+        return uint32_t(std::max(eyeChain[0].textures.size(), eyeChain[1].textures.size()));
+    }
     double eyeCpuMs[2] = {};
     double eyeGpuMs[2] = {};
 
@@ -1335,6 +1381,9 @@ private:
     Readback panelReadback;
 
     sfvr_perf perf = {};
+    double perfWindowStartS = 0.0;
+    uint64_t perfWindowArrivals = 0;
+    uint64_t perfWindowRebases = 0;
     Autostart autostart;
     bool autostartBegun = false;
     double gameplaySinceS = 0.0;
