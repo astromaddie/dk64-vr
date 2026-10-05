@@ -47,6 +47,33 @@ float quatYaw(const Quat &q);  // heading about +Y of the rotated -Z axis
 Pose poseMul(const Pose &a, const Pose &b);  // b expressed in a's parent
 Pose poseInverse(const Pose &a);
 
+// The rotation whose columns are the orthonormal axes x, y, z.
+Quat quatFromBasis(const Vec3 &x, const Vec3 &y, const Vec3 &z);
+Vec3 cross(const Vec3 &a, const Vec3 &b);
+float dot(const Vec3 &a, const Vec3 &b);
+Vec3 normalize(const Vec3 &v);
+
+// Layer placement (OpenXR quad layers: the quad lies in its pose's XY plane, facing +Z).
+// A beam from `from` to `to`: the pose's +Y runs along the beam and the quad is turned about
+// that axis to face `eye`. The quad is (width x |to - from|).
+Pose beamPose(const Vec3 &from, const Vec3 &to, const Vec3 &eye);
+// Head-leashed without roll (standard.md section 4): the head's yaw and pitch, never its roll,
+// `distance` ahead of `headPos`.
+Pose noRollPose(const Quat &head, const Vec3 &headPos, float distance);
+
+// Heading of a view's camera (counter-clockwise from above, radians, as quatYaw) and its
+// position.
+float viewHeading(const Mat4 &view);
+Vec3 viewPosition(const Mat4 &view);
+
+// The snap turn's instant step (docs/VR_ARCHITECTURE.md, "Turning"): the game eases its camera
+// to a new heading over a second or more, so until it arrives the eye view is the game view
+// orbited about the point `pivotDistance` ahead of the camera (the look-at target, which the game
+// camera itself orbits) by whatever the game camera has still to turn, so the view shows the
+// target heading at once. Returns the orbited view; *delta gets the remaining turn.
+Mat4 orbitView(const Mat4 &view, float targetHeadingRad, float pivotDistance, float *delta);
+float wrapAngle(float radians);  // to -pi..pi
+
 // libultra transcriptions (guPerspectiveF, guLookAtF), used as references by the tests.
 Mat4 guPerspective(float fovyDegrees, float aspect, float nearZ, float farZ, float scale);
 Mat4 guLookAt(const Vec3 &eye, const Vec3 &at, const Vec3 &up);

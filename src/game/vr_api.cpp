@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 
@@ -132,7 +133,11 @@ extern "C" int dk64vr_take_turn(void) {
     std::lock_guard<std::mutex> lock(g_turn_mutex);
     const int degrees = g_turn_degrees;
     g_turn_degrees = 0;
-    if ((degrees == 0) || ((std::chrono::steady_clock::now() - g_turn_time) > std::chrono::milliseconds(300))) {
+    if (degrees == 0) {
+        return 0;
+    }
+    if ((std::chrono::steady_clock::now() - g_turn_time) > std::chrono::milliseconds(300)) {
+        std::printf("[vr] turn: %d deg dropped (not taken within 0.3 s)\n", degrees);
         return 0;
     }
     return degrees;

@@ -512,6 +512,32 @@ public:
                 setting("world_scale"), int(setting("level_pitch")));
         }
 
+        if (turnActive) {
+            const dk64vr_game_state state = gameState();
+            const float dx = state.cam_at[0] - state.cam_eye[0], dz = state.cam_at[2] - state.cam_eye[2];
+            float delta = 0.0f;
+            gameView = orbitView(gameView, turnTarget, std::sqrt(dx * dx + dz * dz), &delta);
+            if (eye == 0) {
+                turnDelta = delta;
+                // Done when the game camera arrives; given up when it takes too long, when
+                // something else turns it (the gap grows past 60 degrees, or C-left/C-right is
+                // pressed), or outside play.
+                const bool settled = std::fabs(delta) < 0.004f;
+                const bool timedOut = (displayS - turnStartS) > 8.0;
+                const bool overtaken = (std::fabs(delta) > 1.05f) || ((latestInput.buttons & (n64::CLeft | n64::CRight)) != 0);
+                if (settled || timedOut || overtaken || (state.scene != DK64VR_SCENE_GAMEPLAY)) {
+                    dk64vr_logf("turn: game camera %s after %.2f s (%.1f deg left)", settled ? "arrived" : (timedOut ? "timed out" : (overtaken ? "turned by the game" : "left gameplay")),
+                        displayS - turnStartS, delta * 180.0f / 3.1415926f);
+                    turnActive = false;
+                    turnDelta = 0.0f;
+                }
+            }
+        }
+
+        if (eye == 0) {
+            shownHeading = viewHeading(gameView);
+        }
+
         if (setting("level_pitch") != 0.0) {
             gameView = levelView(gameView);
         }
@@ -566,6 +592,9 @@ public:
         XrCompositionLayerProjection projection = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
         XrCompositionLayerProjectionView views[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
         XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        std::vector<XrCompositionLayerQuad> &extraQuads = extraQuadStorage;
+        extraQuads.clear();
+        extraQuads.reserve(8);
         bool stereoShown = false;
         if (rendering) {
             stereoShown = (frameMode == RT64::VrFrame::Mode::Stereo) && eyesRecorded[0] && eyesRecorded[1];
@@ -608,17 +637,31 @@ public:
             const bool panelShown = !stereoShown && !probing;
             if (panelShown && panelReady.load()) {
                 const float width = float(setting("panel_width"));
-                Pose panelPose = origin;
-                panelPose = poseMul(origin, Pose { Quat(), { 0.0f, 0.0f, -float(setting("panel_distance")) } });
+                const Pose panel = panelPose();
                 quad.space = localSpace;
                 quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                 quad.subImage.swapchain = panelChain.handle;
                 quad.subImage.imageRect.offset = { 0, 0 };
                 quad.subImage.imageRect.extent = { int32_t(panelChain.width), int32_t(panelChain.height) };
-                quad.pose = toXr(panelPose);
+                quad.pose = toXr(panel);
                 quad.size = { width, width * float(panelChain.height) / float(panelChain.width) };
                 layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&quad));
             }
+
+            // The snap blink: opaque black in front of the eyes while the game camera settles on
+            // its new heading (head-locked, so no world motion shows).
+            if (uiReady && (displayS < blinkUntilS)) {
+                Pose ahead;
+                ahead.p = { 0.0f, 0.0f, -0.3f };
+                extraQuads.push_back(uiQuad(viewSpace, ahead, 96, 32, 3.0f, 3.0f));
+            }
+
+            addPointerLayers(extraQuads);
+            for (const XrCompositionLayerQuad &extra : extraQuads) {
+                layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&extra));
+            }
+
+            logLayers(layers, views);
 
             if (stereoShown) {
                 stereoFrames++;
@@ -864,12 +907,14 @@ private:
 
         input.create(instance, session, haveFrameProfile);
         frameWorker = std::make_unique<RT64::RenderWorker>(device, "VR Frame", plume::RenderCommandListType::DIRECT);
+        createUiImage();
         panelWorker = std::make_unique<RT64::RenderWorker>(device, "VR Panel", plume::RenderCommandListType::DIRECT);
         dk64vr_logpf("[openxr]", "session created; eye swapchains %ux%u format %d, panel %ux%u", eyeChain[0].width, eyeChain[0].height, int(eyeChain[0].format), panelChain.width, panelChain.height);
     }
 
-    void createSwapchain(Swapchain &chain, uint32_t width, uint32_t height, VkFormat format, VkFormat viewFormat, plume::RenderFormat renderFormat, bool bgra, bool transferSource) {
+    void createSwapchain(Swapchain &chain, uint32_t width, uint32_t height, VkFormat format, VkFormat viewFormat, plume::RenderFormat renderFormat, bool bgra, bool transferSource, XrSwapchainCreateFlags createFlags = 0) {
         XrSwapchainCreateInfo info = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
+        info.createFlags = createFlags;
         info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
         if (transferSource) {
             info.usageFlags |= XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
@@ -943,6 +988,7 @@ private:
 
         destroySwapchain(eyeChain[0]);
         destroySwapchain(eyeChain[1]);
+        destroySwapchain(uiChain);
         eyeReadback[0].buffer.reset();
         eyeReadback[1].buffer.reset();
         panelReadback.buffer.reset();
@@ -1278,7 +1324,7 @@ private:
             }
         }
 
-        return quatYaw(headInOriginQ);
+        return quatYaw(headInOriginQ) + turnDelta;  // plus what the game camera has still to turn
     }
 
     void updateInput(bool renderingNow) {
@@ -1289,7 +1335,9 @@ private:
         const dk64vr_game_state state = gameState();
         InputContext context;
         context.menuOpen = uiCapturing;
-        context.stereoPlay = stereoLatched && !cinemaActive && ((state.scene == DK64VR_SCENE_GAMEPLAY) || (state.scene == DK64VR_SCENE_FIRST_PERSON));
+        // Turning and view-relative movement in third-person play only (first person turns with
+        // the head and the game's own aim).
+        context.stereoPlay = stereoLatched && !cinemaActive && (state.scene == DK64VR_SCENE_GAMEPLAY);
         context.viewYawRad = moveYawRad();
         const float dt = float(std::min(periodS, 0.1));
         const InputResult r = mapper.update(s, inputConfig(), context, displayS, dt);
@@ -1312,8 +1360,21 @@ private:
             applyTurn(r.turnDeg);
         }
 
-        sendNav(r.navHeld);
+        uint32_t navHeld = r.navHeld;
+        const double sinceStart = monotonicSeconds() - sessionStartS;
+        if ((setting("diag_menu_at") > 0.0) && (sinceStart > setting("diag_menu_at")) && (diagMenuReads < 2)) {
+            // Diagnostic: the View short press, for two reads.
+            if (diagMenuReads == 0) {
+                dk64vr_logf("diag: opening the recomp menu");
+            }
+
+            diagMenuReads++;
+            navHeld |= nav::ToggleMenu;
+        }
+
+        sendNav(navHeld);
         updatePointer(s);
+        diagSnap();
 
         // The game's Rumble Pak: 40 ms pulses on both hands while the motor runs.
         if (rumbleOn.load() && s.valid) {
@@ -1345,6 +1406,13 @@ private:
         // Rotates the game camera's heading (the camera patch takes it through recomp_vr_take_turn,
         // dk64vr_control.h) by the step; the eye camera follows
         // the game camera, so the world turns about Donkey Kong with no smooth swing.
+        // The view shows the new heading at once (orbitView); the game camera eases after it.
+        const dk64vr_game_state state = gameState();
+        const float headingNow = std::atan2(-(state.cam_at[0] - state.cam_eye[0]), -(state.cam_at[2] - state.cam_eye[2]));
+        turnTarget = (turnActive ? turnTarget : headingNow) - deg * 3.1415926f / 180.0f;
+        turnActive = true;
+        turnStartS = displayS;
+
         turnRemainder += deg;
         const int whole = int(turnRemainder);
         turnRemainder -= float(whole);
@@ -1355,6 +1423,34 @@ private:
         if (std::fabs(deg) >= 5.0f) {
             dk64vr_logf("turn: %.0f deg", deg);
             blinkUntilS = displayS + setting("snap_blink");
+        }
+    }
+
+    // Diagnostic: a snap turn right every diag_snap_seconds of stereo play, then the game
+    // camera's heading for the next 12 display frames (direction and settle time).
+    void diagSnap() {
+        const double every = setting("diag_snap_seconds");
+        const dk64vr_game_state state = gameState();
+        if ((every <= 0.0) || !stereoLatched || (state.scene != DK64VR_SCENE_GAMEPLAY)) {
+            return;
+        }
+
+        const float fx = state.cam_at[0] - state.cam_eye[0], fz = state.cam_at[2] - state.cam_eye[2];
+        const float heading = std::atan2(-fx, -fz) * 180.0f / 3.1415926f;  // counter-clockwise from above
+        if (diagSnapFrames >= 0) {
+            dk64vr_logf("diag snap: +%d frames, game camera heading %.1f deg, shown %.1f deg, game frame %u", diagSnapFrames, heading, shownHeading * 180.0f / 3.1415926f, state.frame);
+            diagSnapFrames = (diagSnapFrames >= 12) ? -1 : (diagSnapFrames + 1);
+            return;
+        }
+
+        if (diagSnapNextS == 0.0) {
+            diagSnapNextS = displayS + every;
+        }
+        else if (displayS >= diagSnapNextS) {
+            diagSnapNextS = displayS + every;
+            dk64vr_logf("diag snap: turning right %d deg from heading %.1f deg (a right turn lowers it)", int(setting("snap_angle")), heading);
+            applyTurn(float(setting("snap_angle")));
+            diagSnapFrames = 0;
         }
     }
 
@@ -1409,7 +1505,23 @@ private:
         pointer.visible = false;
         const int hand = dominantHand();
         Pose aim;
-        if (!s.valid || !panelShownLast || !uiMouse || !input.aimPose(hand, aim) || (panelChain.width == 0)) {
+        bool haveAim = s.valid && input.aimPose(hand, aim);
+        if (!haveAim && (setting("diag_pointer") != 0.0)) {
+            // Diagnostic: a hand 25 cm right of and 30 cm below the recentre origin, aimed at a
+            // point right of and above the panel's centre.
+            const Pose panel = panelPose();
+            const Vec3 handPos = quatRotate(origin.q, Vec3 { 0.25f, -0.3f, 0.0f });
+            aim.p = { origin.p.x + handPos.x, origin.p.y + handPos.y, origin.p.z + handPos.z };
+            const Vec3 target = quatRotate(panel.q, Vec3 { 0.15f * float(setting("panel_width")), 0.1f, 0.0f });
+            const Vec3 to = normalize({ panel.p.x + target.x - aim.p.x, panel.p.y + target.y - aim.p.y, panel.p.z + target.z - aim.p.z });
+            const Vec3 up = { 0.0f, 1.0f, 0.0f };
+            const Vec3 x = normalize(cross(to, up));
+            const Vec3 y = cross(x, to);
+            aim.q = quatFromBasis(x, y, Vec3 { -to.x, -to.y, -to.z });
+            haveAim = true;
+        }
+
+        if (!haveAim || !panelShownLast || !(uiMouse || (setting("diag_pointer") != 0.0)) || (panelChain.width == 0)) {
             if (pointerDown) {
                 pointerDown = false;
                 queueMouseButton(false);
@@ -1453,6 +1565,10 @@ private:
             recompui::queue_event(event);
         }
 
+        if (!s.valid) {
+            return;  // a synthetic pointer moves and shows, never clicks
+        }
+
         const float trigger = (hand == 0) ? s.lTrigger : s.rTrigger;
         const bool down = triggerClick(pointerDown, trigger);
         if (down != pointerDown) {
@@ -1483,6 +1599,122 @@ private:
         event.button.x = pointerPx;
         event.button.y = pointerPy;
         recompui::queue_event(event);
+    }
+
+
+    // The static UI image (one 128x64 sRGB image, filled once; lesson 38): the pointer's dot
+    // (x 0-63), the beam's cross-section (x 64-95) and opaque black (x 96-127, the snap blink).
+    static const uint32_t UiWidth = 128, UiHeight = 64;
+
+    void createUiImage() {
+        if (!frameWorker) {
+            return;
+        }
+
+        createSwapchain(uiChain, UiWidth, UiHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, plume::RenderFormat::R8G8B8A8_UNORM, false, false, XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT);
+        if (uiChain.handle == XR_NULL_HANDLE) {
+            return;
+        }
+
+        // Unpremultiplied RGBA (the layers say so). Colours are sRGB-encoded bytes.
+        std::vector<uint8_t> pixels(UiWidth * UiHeight * 4, 0);
+        auto put = [&](uint32_t x, uint32_t y, uint8_t r, uint8_t g, uint8_t b, float a) {
+            uint8_t *p = &pixels[(y * UiWidth + x) * 4];
+            p[0] = r;
+            p[1] = g;
+            p[2] = b;
+            p[3] = uint8_t(std::lround(std::fmax(0.0f, std::fmin(1.0f, a)) * 255.0f));
+        };
+
+        for (uint32_t y = 0; y < UiHeight; y++) {
+            for (uint32_t x = 0; x < 64; x++) {
+                // Dot: a light disc with a dark rim, so it shows on light and dark menus.
+                const float dx = float(x) + 0.5f - 32.0f, dy = float(y) + 0.5f - 32.0f;
+                const float r = std::sqrt(dx * dx + dy * dy);
+                if (r < 22.0f) {
+                    put(x, y, 235, 250, 255, std::fmin(1.0f, 22.0f - r));
+                }
+                else {
+                    put(x, y, 20, 30, 40, std::fmin(1.0f, 31.0f - r) * 0.85f);
+                }
+            }
+
+            for (uint32_t x = 64; x < 96; x++) {
+                // Beam: bright core, soft edges across the width.
+                const float u = (float(x - 64) + 0.5f) / 32.0f;
+                const float a = std::fmax(0.0f, 1.0f - std::fabs(u - 0.5f) * 2.0f);
+                put(x, y, 200, 235, 255, a * a * 0.9f);
+            }
+
+            for (uint32_t x = 96; x < 128; x++) {
+                put(x, y, 0, 0, 0, 1.0f);
+            }
+        }
+
+        if (XR_FAILED(acquireImage(uiChain))) {
+            dk64vr_logpf("[openxr]", "UI image acquire failed; no pointer");
+            destroySwapchain(uiChain);
+            return;
+        }
+
+        std::unique_ptr<plume::RenderBuffer> upload = device->createBuffer(plume::RenderBufferDesc::UploadBuffer(pixels.size()));
+        void *mapped = upload->map();
+        memcpy(mapped, pixels.data(), pixels.size());
+        upload->unmap();
+        plume::VulkanTexture *image = uiChain.textures[uiChain.index].get();
+        image->textureLayout = plume::RenderTextureLayout::COLOR_WRITE;
+        image->barrierStages = plume::RenderBarrierStage::GRAPHICS;
+        plume::RenderCommandList *commandList = frameWorker->commandList.get();
+        commandList->begin();
+        commandList->barriers(plume::RenderBarrierStage::COPY, plume::RenderTextureBarrier(image, plume::RenderTextureLayout::COPY_DEST));
+        commandList->copyTextureRegion(plume::RenderTextureCopyLocation::Subresource(image),
+            plume::RenderTextureCopyLocation::PlacedFootprint(upload.get(), plume::RenderFormat::R8G8B8A8_UNORM, UiWidth, UiHeight, 1, UiWidth));
+        commandList->barriers(plume::RenderBarrierStage::GRAPHICS, plume::RenderTextureBarrier(image, plume::RenderTextureLayout::COLOR_WRITE));
+        commandList->end();
+        frameWorker->execute();
+        frameWorker->wait();
+        {
+            std::scoped_lock lock(*queueMutex);
+            XrSwapchainImageReleaseInfo releaseInfo = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+            xrReleaseSwapchainImage(uiChain.handle, &releaseInfo);
+        }
+
+        uiReady = true;
+        dk64vr_logf("UI image ready (pointer, blink)");
+    }
+
+    XrCompositionLayerQuad uiQuad(XrSpace space, const Pose &pose, int32_t x, int32_t width, float sizeX, float sizeY) const {
+        XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+        quad.space = space;
+        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        quad.subImage.swapchain = uiChain.handle;
+        quad.subImage.imageRect.offset = { x, 0 };
+        quad.subImage.imageRect.extent = { width, int32_t(UiHeight) };
+        quad.pose = toXr(pose);
+        quad.size = { sizeX, sizeY };
+        return quad;
+    }
+
+    // The pointer, composited above everything (standard.md section 3, lessons 80 and 83): the
+    // dot lies flat on the panel, lifted 1 cm towards the viewer; the beam stops 2 cm short of it.
+    void addPointerLayers(std::vector<XrCompositionLayerQuad> &quads) {
+        if (!uiReady || !pointer.visible) {
+            return;
+        }
+
+        const Vec3 normal = quatRotate(pointer.surface.q, Vec3 { 0.0f, 0.0f, 1.0f });
+        Pose dot = pointer.surface;
+        dot.p = { pointer.hit.x + 0.01f * normal.x, pointer.hit.y + 0.01f * normal.y, pointer.hit.z + 0.01f * normal.z };
+        const float beamLength = pointer.length - 0.02f;
+        if (beamLength > 0.05f) {
+            const Vec3 end = { pointer.origin.x + beamLength * pointer.dir.x, pointer.origin.y + beamLength * pointer.dir.y, pointer.origin.z + beamLength * pointer.dir.z };
+            const Vec3 eye = { 0.5f * (eyeSubmitPose[0].p.x + eyeSubmitPose[1].p.x), 0.5f * (eyeSubmitPose[0].p.y + eyeSubmitPose[1].p.y), 0.5f * (eyeSubmitPose[0].p.z + eyeSubmitPose[1].p.z) };
+            quads.push_back(uiQuad(localSpace, beamPose(pointer.origin, end, eye), 64, 32, 0.006f, beamLength));
+        }
+
+        const float dotSize = 0.012f * float(setting("panel_distance"));
+        quads.push_back(uiQuad(localSpace, dot, 0, 64, dotSize, dotSize));
     }
 
     // ----------------------------------------------------------------------------------------
@@ -1623,7 +1855,45 @@ private:
         }
     }
 
+    // Diagnostics: every layer's geometry in LOCAL space (quads in VIEW space are marked), for
+    // tools/steam_frame/composite.py to rebuild what SteamVR composites from the image dumps.
+    // Every 2 s while panel dumps run, and with every eye dump.
+    void logLayers(const std::vector<const XrCompositionLayerBaseHeader *> &layers, const XrCompositionLayerProjectionView *views) {
+        const bool periodic = (setting("dump_panel_frame") > 0.0) && ((frameCount % 144) == 0);
+        if (!periodic && !layersLogDue) {
+            return;
+        }
+
+        layersLogDue = false;
+        std::string line = "layers: frame " + std::to_string(frameCount);
+        char buffer[256];
+        for (const XrCompositionLayerBaseHeader *layer : layers) {
+            if (layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                for (int eye = 0; eye < 2; eye++) {
+                    const XrPosef &p = views[eye].pose;
+                    const XrFovf &f = views[eye].fov;
+                    snprintf(buffer, sizeof(buffer), " | proj%d p %.4f %.4f %.4f q %.5f %.5f %.5f %.5f fov %.4f %.4f %.4f %.4f rect %d %d %d %d", eye,
+                        p.position.x, p.position.y, p.position.z, p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w,
+                        f.angleLeft, f.angleRight, f.angleUp, f.angleDown, views[eye].subImage.imageRect.offset.x, views[eye].subImage.imageRect.offset.y,
+                        views[eye].subImage.imageRect.extent.width, views[eye].subImage.imageRect.extent.height);
+                    line += buffer;
+                }
+            }
+            else if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                const XrCompositionLayerQuad *q = reinterpret_cast<const XrCompositionLayerQuad *>(layer);
+                const char *name = (q->subImage.swapchain == panelChain.handle) ? "panel" : ((q->subImage.swapchain == hudChain.handle) ? "hud" : "ui");
+                snprintf(buffer, sizeof(buffer), " | %s%s p %.4f %.4f %.4f q %.5f %.5f %.5f %.5f size %.4f %.4f rect %d %d %d %d", name, (q->space == viewSpace) ? "@view" : "",
+                    q->pose.position.x, q->pose.position.y, q->pose.position.z, q->pose.orientation.x, q->pose.orientation.y, q->pose.orientation.z, q->pose.orientation.w,
+                    q->size.width, q->size.height, q->subImage.imageRect.offset.x, q->subImage.imageRect.offset.y, q->subImage.imageRect.extent.width, q->subImage.imageRect.extent.height);
+                line += buffer;
+            }
+        }
+
+        dk64vr_logf("%s", line.c_str());
+    }
+
     void logDumpState() {
+        layersLogDue = true;
         const dk64vr_game_state state = gameState();
         const Vec3 l = eyeInHead[0].p, r = eyeInHead[1].p;
         dk64vr_logf("dump %" PRIu64 ": stereo frame %" PRIu64 ", diag_yaw %.0f, scene %s, cameras %u, eye L at %.3f %.3f %.3f R at %.3f %.3f %.3f m, weight %.2f, cam %.0f %.0f %.0f -> %.0f %.0f %.0f",
@@ -1665,6 +1935,11 @@ private:
 
     Swapchain eyeChain[2];
     Swapchain panelChain;
+    Swapchain uiChain;
+    Swapchain hudChain;
+    bool layersLogDue = false;
+    bool uiReady = false;
+    std::vector<XrCompositionLayerQuad> extraQuadStorage;
     std::mutex panelMutex;
     std::atomic<bool> panelReady = false;
     std::atomic<bool> panelWanted = true;
@@ -1748,6 +2023,11 @@ private:
     bool cinemaActive = false;
     Quat headInOriginQ;
     float turnRemainder = 0.0f;
+    bool turnActive = false;
+    float turnTarget = 0.0f;
+    float turnDelta = 0.0f;
+    double turnStartS = 0.0;
+    float shownHeading = 0.0f;
     double blinkUntilS = 0.0;
     struct PointerState {
         bool visible = false;
@@ -1756,6 +2036,9 @@ private:
         Pose surface;
     } pointer;
     bool pointerDown = false;
+    uint32_t diagMenuReads = 0;
+    double diagSnapNextS = 0.0;
+    int diagSnapFrames = -1;
     int pointerPx = -1, pointerPy = -1;
 
     bool waitFailed = false, beginFailed = false, endFailed = false, panelFailed = false, acquireFailed = false;

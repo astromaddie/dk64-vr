@@ -414,10 +414,14 @@ RECOMP_PATCH void func_global_asm_8061D1FC(Actor* arg0) {
     // camera below does, instead of the C-button swing.
     if (recomp_vr_is_active() && (CaaD->unkFB == 0)) {
         s32 vr_turn = recomp_vr_take_turn();
-        if ((vr_turn != 0) && (CaaD->unkF3 != 2)) {
-            CaaD->unkB0 = 0;
-            CaaD->unkB2 = (CaaD->unkB2 - (vr_turn * 4096) / 360) & 0xFFF;
-            CaaD->unkF1 = 1; // Makes things snappy
+        if (vr_turn != 0) {
+            s16 vr_from = CaaD->unkB2;
+            if (CaaD->unkF3 != 2) {
+                CaaD->unkB0 = 0;
+                CaaD->unkB2 = (CaaD->unkB2 - (vr_turn * 4096) / 360) & 0xFFF;
+                CaaD->unkF1 = 1; // Makes things snappy
+            }
+            recomp_printf("[vr] turn: camera heading %d -> %d (4096 a turn, mode %d)\n", vr_from, CaaD->unkB2, CaaD->unkF3);
         }
     }
     temp_f2 = D_global_asm_807FD610[CaaD->unkFB].unk2F * 0.5;

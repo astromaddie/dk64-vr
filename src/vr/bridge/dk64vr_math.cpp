@@ -85,6 +85,144 @@ Quat quatFromYaw(float radians) {
     return { 0.0f, std::sin(radians * 0.5f), 0.0f, std::cos(radians * 0.5f) };
 }
 
+Vec3 cross(const Vec3 &a, const Vec3 &b) {
+    return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
+}
+
+float dot(const Vec3 &a, const Vec3 &b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+Vec3 normalize(const Vec3 &v) {
+    const float len = std::sqrt(dot(v, v));
+    return (len > 1e-12f) ? Vec3 { v.x / len, v.y / len, v.z / len } : Vec3 { 0.0f, 0.0f, 0.0f };
+}
+
+Quat quatFromBasis(const Vec3 &x, const Vec3 &y, const Vec3 &z) {
+    // Shepperd's method on the matrix with columns x, y, z.
+    const float m00 = x.x, m10 = x.y, m20 = x.z;
+    const float m01 = y.x, m11 = y.y, m21 = y.z;
+    const float m02 = z.x, m12 = z.y, m22 = z.z;
+    const float trace = m00 + m11 + m22;
+    Quat q;
+    if (trace > 0.0f) {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        q.w = 0.25f * s;
+        q.x = (m21 - m12) / s;
+        q.y = (m02 - m20) / s;
+        q.z = (m10 - m01) / s;
+    }
+    else if ((m00 > m11) && (m00 > m22)) {
+        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        q.w = (m21 - m12) / s;
+        q.x = 0.25f * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+    }
+    else if (m11 > m22) {
+        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25f * s;
+        q.z = (m12 + m21) / s;
+    }
+    else {
+        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25f * s;
+    }
+
+    return quatNormalize(q);
+}
+
+Pose beamPose(const Vec3 &from, const Vec3 &to, const Vec3 &eye) {
+    Pose pose;
+    pose.p = { 0.5f * (from.x + to.x), 0.5f * (from.y + to.y), 0.5f * (from.z + to.z) };
+    const Vec3 y = normalize({ to.x - from.x, to.y - from.y, to.z - from.z });
+    Vec3 toEye = { eye.x - pose.p.x, eye.y - pose.p.y, eye.z - pose.p.z };
+    Vec3 x = cross(y, toEye);
+    if (dot(x, x) < 1e-10f) {
+        x = cross(y, Vec3 { 0.0f, 1.0f, 0.0f });
+        if (dot(x, x) < 1e-10f) {
+            x = { 1.0f, 0.0f, 0.0f };
+        }
+    }
+
+    x = normalize(x);
+    const Vec3 z = cross(x, y);
+    pose.q = quatFromBasis(x, y, z);
+    return pose;
+}
+
+float wrapAngle(float radians) {
+    const float twoPi = 6.28318530718f;
+    radians = std::fmod(radians + 3.14159265359f, twoPi);
+    if (radians < 0.0f) {
+        radians += twoPi;
+    }
+
+    return radians - 3.14159265359f;
+}
+
+Vec3 viewPosition(const Mat4 &view) {
+    const Mat4 cam = rigidInverse(view);
+    return { cam.m[3][0], cam.m[3][1], cam.m[3][2] };
+}
+
+float viewHeading(const Mat4 &view) {
+    // The camera's -Z axis in world space is minus the third row of its camera-to-world matrix.
+    const Mat4 cam = rigidInverse(view);
+    return std::atan2(cam.m[2][0], cam.m[2][2]);
+}
+
+Mat4 orbitView(const Mat4 &view, float targetHeadingRad, float pivotDistance, float *delta) {
+    const Mat4 cam = rigidInverse(view);
+    const float d = wrapAngle(targetHeadingRad - std::atan2(cam.m[2][0], cam.m[2][2]));
+    if (delta != nullptr) {
+        *delta = d;
+    }
+
+    // The pivot: pivotDistance ahead of the camera, horizontally.
+    const float fx = -cam.m[2][0], fz = -cam.m[2][2];
+    const float flen = std::sqrt(fx * fx + fz * fz);
+    Vec3 pivot = { cam.m[3][0], cam.m[3][1], cam.m[3][2] };
+    if (flen > 1e-6f) {
+        pivot.x += fx / flen * pivotDistance;
+        pivot.z += fz / flen * pivotDistance;
+    }
+
+    // W moves the camera by the rotation about +Y through the pivot (row vectors: v * W); the
+    // new view is inverse(W) * view, i.e. points go through T(-pivot) R(-d) T(pivot) first.
+    const float c = std::cos(-d), s = std::sin(-d);
+    Mat4 toPivot, rot, back;
+    toPivot.m[3][0] = -pivot.x;
+    toPivot.m[3][1] = -pivot.y;
+    toPivot.m[3][2] = -pivot.z;
+    // Row-vector form of the rotation about +Y by -d: x' = x c - z s, z' = x s + z c.
+    rot.m[0][0] = c;
+    rot.m[0][2] = -s;
+    rot.m[2][0] = s;
+    rot.m[2][2] = c;
+    back.m[3][0] = pivot.x;
+    back.m[3][1] = pivot.y;
+    back.m[3][2] = pivot.z;
+    return mul(mul(mul(toPivot, rot), back), view);
+}
+
+Pose noRollPose(const Quat &head, const Vec3 &headPos, float distance) {
+    const Vec3 f = quatRotate(head, Vec3 { 0.0f, 0.0f, -1.0f });
+    const float yaw = std::atan2(-f.x, -f.z);
+    const float pitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, f.y)));
+    const Quat qPitch = { std::sin(pitch * 0.5f), 0.0f, 0.0f, std::cos(pitch * 0.5f) };
+    Pose pose;
+    pose.q = quatMul(quatFromYaw(yaw), qPitch);
+    const Vec3 fwd = quatRotate(pose.q, Vec3 { 0.0f, 0.0f, -1.0f });
+    pose.p = { headPos.x + distance * fwd.x, headPos.y + distance * fwd.y, headPos.z + distance * fwd.z };
+    return pose;
+}
+
 Quat quatNormalize(const Quat &q) {
     const float len = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
     if (!(len > 1e-12f)) {

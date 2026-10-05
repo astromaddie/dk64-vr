@@ -449,14 +449,16 @@ static void testSettings() {
     CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 15.0, 0.0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.0, 1e-9);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("refresh_rate")], 90.0, 0.0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("port_schema")], 2.0, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("port_schema")], 3.0, 0.0);
     const char *chosen =
         "version = 1\n"
         "[vr]\n"
         "port_schema = 2\n"
-        "world_scale = 25\n";
+        "world_scale = 25\n"
+        "snap_blink = 0.15\n";
     dk64vr_settings_parse(&s, chosen, std::strlen(chosen));
     CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 25.0, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("snap_blink")], 0.0, 0.0);
     // Enum keys by name.
     const char *names =
         "[vr]\n"
@@ -754,6 +756,61 @@ static void testMerge() {
     CHECK(!triggerClick(false, 0.59f) && triggerClick(false, 0.6f) && triggerClick(true, 0.46f) && !triggerClick(true, 0.45f));
 }
 
+static void testLayerPoses() {
+    // quatFromBasis round trip.
+    const Quat q = quatNormalize({ 0.2f, -0.4f, 0.1f, 0.85f });
+    const Quat r = quatFromBasis(quatRotate(q, { 1, 0, 0 }), quatRotate(q, { 0, 1, 0 }), quatRotate(q, { 0, 0, 1 }));
+    const Vec3 a = quatRotate(q, { 0.3f, 0.5f, -0.7f }), b = quatRotate(r, { 0.3f, 0.5f, -0.7f });
+    CHECK_NEAR(a.x, b.x, 1e-5);
+    CHECK_NEAR(a.y, b.y, 1e-5);
+    CHECK_NEAR(a.z, b.z, 1e-5);
+    // The beam's +Y runs from start to end, and its face (+Z) points at the eye's side.
+    const Vec3 from = { 0.2f, 1.0f, -0.3f }, to = { 0.0f, 1.2f, -2.0f }, eye = { 0.0f, 1.6f, 0.0f };
+    const Pose beam = beamPose(from, to, eye);
+    const Vec3 y = quatRotate(beam.q, { 0, 1, 0 }), z = quatRotate(beam.q, { 0, 0, 1 });
+    const Vec3 dir = normalize({ to.x - from.x, to.y - from.y, to.z - from.z });
+    CHECK_NEAR(dot(y, dir), 1.0, 1e-5);
+    CHECK(dot(z, { eye.x - beam.p.x, eye.y - beam.p.y, eye.z - beam.p.z }) > 0.0f);
+    CHECK_NEAR(beam.p.z, -1.15, 1e-5);
+    // No roll: a rolled, pitched, yawed head gives a quad with the same yaw and pitch, level x axis.
+    const Quat head = quatMul(quatMul(quatFromYaw(0.6f), Quat { std::sin(-0.15f), 0, 0, std::cos(-0.15f) }), Quat { 0, 0, std::sin(0.3f), std::cos(0.3f) });
+    const Pose hud = noRollPose(head, { 0, 1.6f, 0 }, 1.5f);
+    const Vec3 hx = quatRotate(hud.q, { 1, 0, 0 });
+    CHECK_NEAR(hx.y, 0.0, 1e-5);
+    const Vec3 hf = quatRotate(hud.q, { 0, 0, -1 }), headF = quatRotate(head, { 0, 0, -1 });
+    CHECK_NEAR(dot(hf, headF), 1.0, 1e-5);
+    CHECK_NEAR(hud.p.y - 1.6f, 1.5f * headF.y, 1e-5);
+}
+
+static void testOrbitView() {
+    // A camera 300 units behind its target, facing heading 40 degrees, slightly pitched.
+    const float h0 = 40.0f * 3.1415926f / 180.0f;
+    const Vec3 target = { 1000.0f, 200.0f, -500.0f };
+    const Vec3 eye = { target.x + 300.0f * std::sin(h0), target.y + 80.0f, target.z + 300.0f * std::cos(h0) };
+    const Mat4 view = guLookAt(eye, target, { 0, 1, 0 });
+    CHECK_NEAR(viewHeading(view), h0, 1e-4);
+    const float dist = std::sqrt((eye.x - target.x) * (eye.x - target.x) + (eye.z - target.z) * (eye.z - target.z));
+    // Orbit to heading 10 degrees (a 30 degree right turn).
+    const float h1 = 10.0f * 3.1415926f / 180.0f;
+    float delta = 0.0f;
+    const Mat4 v = orbitView(view, h1, dist, &delta);
+    CHECK_NEAR(delta, h1 - h0, 1e-5);
+    CHECK_NEAR(viewHeading(v), h1, 1e-4);
+    // The look-at target stays where it was in view space (straight ahead, same depth).
+    const Vec3 a = transformPoint(target, view), b = transformPoint(target, v);
+    CHECK_NEAR(a.x, b.x, 1e-2);
+    CHECK_NEAR(a.y, b.y, 1e-2);
+    CHECK_NEAR(a.z, b.z, 1e-2);
+    // And the result is what the game camera would show at the new heading.
+    const Vec3 eye1 = { target.x + 300.0f * std::sin(h1), eye.y, target.z + 300.0f * std::cos(h1) };
+    CHECK(matNear(v, guLookAt(eye1, target, { 0, 1, 0 }), 2e-3f));
+    // At the target heading nothing changes.
+    const Mat4 same = orbitView(view, h0, dist, &delta);
+    CHECK_NEAR(delta, 0.0, 1e-5);
+    CHECK(matNear(same, view, 1e-3f));
+    CHECK_NEAR(wrapAngle(3.5f * 3.1415926f), -0.5f * 3.1415926f, 1e-4);
+}
+
 int main() {
     testEyeProjectionMatchesGuPerspective();
     testEyeProjectionAsymmetricEdges();
@@ -779,6 +836,8 @@ int main() {
     testTurnAndView();
     testMenuNavigation();
     testMerge();
+    testLayerPoses();
+    testOrbitView();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

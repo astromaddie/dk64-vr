@@ -16,18 +16,19 @@ static const sfvr_setting_key port_keys[] = {
 	// Game units per metre. Donkey Kong's model spans 25.2 units ([vr] player extent, DK Isles),
 	// so 15 makes him about 1.7 m tall; docs/VR_ARCHITECTURE.md section 5.
 	{ "world_scale", SFVR_SETTING_FLOAT, 15.0, 5.0, 100.0, NULL },
-	// Schema of this port's keys: 2 moved world_scale 25 -> 15, resolution_scale 1.25 -> 1.0
-	// and refresh_rate 120 -> 72 (files still holding the old defaults are migrated once).
-	{ "port_schema", SFVR_SETTING_INT, 2.0, 0.0, 100.0, NULL },
+	// Schema of this port's keys (migrations in dk64vr_settings_parse): 2 moved world_scale 25 -> 15, resolution_scale 1.25 -> 1.0
+	// refresh_rate 120 -> 72 and hud_distance 2 -> 1.5 (files still holding the old defaults are migrated once).
+	// 3 turned snap_blink 0.15 -> 0.
+	{ "port_schema", SFVR_SETTING_INT, 3.0, 0.0, 100.0, NULL },
 	// Right stick X: a comfort turn (turn_mode, snap_angle: turns the game camera's heading at
 	// once) or the game's own C-left/C-right camera swing.
 	{ "right_stick_x", SFVR_SETTING_ENUM, 0.0, 0.0, 1.0, right_stick_values },
 	// The left stick moves relative to where you look (move_relative: head or a hand) instead
 	// of relative to the game camera.
 	{ "move_from_view", SFVR_SETTING_BOOL, 1.0, 0.0, 1.0, NULL },
-	// Black for this long after a snap turn, hiding the game camera settling on its new
-	// heading. 0 = no blink.
-	{ "snap_blink", SFVR_SETTING_FLOAT, 0.15, 0.0, 0.5, NULL },
+	// Black for this long after a snap turn (an optional blink; the turn itself is instant).
+	// 0 = no blink.
+	{ "snap_blink", SFVR_SETTING_FLOAT, 0.0, 0.0, 0.5, NULL },
 	// Cutscenes and scripted cameras: a 3D cinema screen (standard.md section 4), the head in
 	// the game's camera (immersive), or the flat panel.
 	{ "cutscenes", SFVR_SETTING_ENUM, 0.0, 0.0, 2.0, cutscene_values },
@@ -56,6 +57,15 @@ static const sfvr_setting_key port_keys[] = {
 	{ "dump_count", SFVR_SETTING_INT, 1.0, 1.0, 64.0, NULL },
 	{ "dump_interval", SFVR_SETTING_INT, 120.0, 1.0, 100000.0, NULL },
 	{ "diag_yaw_step", SFVR_SETTING_FLOAT, 0.0, -360.0, 360.0, NULL },
+	// Diagnostic: open the recomp menu this many seconds after the session starts (as a View
+	// press would). 0 = off.
+	{ "diag_menu_at", SFVR_SETTING_FLOAT, 0.0, 0.0, 3600.0, NULL },
+	// Diagnostic: a synthetic right hand aiming at the panel (a little right of and above its
+	// centre) whenever no tracked hand is, so the pointer layers can be dumped unattended.
+	{ "diag_pointer", SFVR_SETTING_BOOL, 0.0, 0.0, 1.0, NULL },
+	// Diagnostic: a snap turn to the right every N seconds of stereo play, with the camera
+	// heading logged for the frames after it (settle time and direction). 0 = off.
+	{ "diag_snap_seconds", SFVR_SETTING_FLOAT, 0.0, 0.0, 600.0, NULL },
 	// Diagnostic: dump the flat panel's image (vr-panel-*.png) every Nth present, up to 40. 0 = off.
 	{ "dump_panel_frame", SFVR_SETTING_INT, 0.0, 0.0, 1000000.0, NULL }
 };
@@ -445,20 +455,23 @@ int dk64vr_settings_parse(dk64vr_settings_t *s, const char *text, size_t len) {
 	// Port schema migration (lesson 79): a file written before schema 2 that still holds an old
 	// default takes the new one; a value the user chose stays.
 	int schema_index = dk64vr_settings_index("port_schema");
-	if (len > 0 && schema_index >= 0 && (!p.seen[schema_index] || s->file_values[schema_index] < 2.0)) {
-		static const struct { const char *name; double from; double to; } moved[] = {
-			{ "world_scale", 25.0, 15.0 },
-			{ "resolution_scale", 1.25, 1.0 },
-			{ "refresh_rate", 120.0, 72.0 },
+	if (len > 0 && schema_index >= 0 && (!p.seen[schema_index] || s->file_values[schema_index] < 3.0)) {
+		const double from_schema = p.seen[schema_index] ? s->file_values[schema_index] : 1.0;
+		static const struct { const char *name; double from; double to; double schema; } moved[] = {
+			{ "world_scale", 25.0, 15.0, 2.0 },
+			{ "resolution_scale", 1.25, 1.0, 2.0 },
+			{ "refresh_rate", 120.0, 72.0, 2.0 },
+			{ "hud_distance", 2.0, 1.5, 2.0 },
+			{ "snap_blink", 0.15, 0.0, 3.0 },
 		};
 		for (size_t m = 0; m < sizeof(moved) / sizeof(moved[0]); m++) {
 			int index = dk64vr_settings_index(moved[m].name);
-			if (index >= 0 && p.seen[index] && fabs(s->file_values[index] - moved[m].from) < 1e-6) {
+			if (index >= 0 && p.seen[index] && from_schema < moved[m].schema && fabs(s->file_values[index] - moved[m].from) < 1e-6) {
 				s->file_values[index] = moved[m].to;
 				dk64vr_logf("settings: %s %g -> %g (new default)", moved[m].name, moved[m].from, moved[m].to);
 			}
 		}
-		s->file_values[schema_index] = 2.0;
+		s->file_values[schema_index] = 3.0;
 		p.repairs++;
 	}
 	if (s->file_version < SFVR_SETTINGS_SCHEMA) {
