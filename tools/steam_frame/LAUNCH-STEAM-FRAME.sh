@@ -34,7 +34,8 @@ fi
 
 # One-shot diagnostics for an unattended run (standard.md section 8): a Steam launch has fixed
 # arguments, so they come from $APP_FOLDER_PATH/vr-diag, which is read and deleted here, so a
-# normal launch never inherits them. Lines are DK64_VR_<KEY>=<value> or RT64_VR_<NAME>=<value> (exported) or ARGS=<extra
+# normal launch never inherits them. Lines are DK64_VR_<KEY>=<value>, RT64_VR_<NAME>=<value> or
+# driver variables (TU_*, FD_*, MESA_*, VK_*, e.g. TU_DEBUG=perf), all exported, or ARGS=<extra
 # game arguments>, e.g. ARGS=--game dk64 to skip the launcher.
 diag="$APP_FOLDER_PATH/vr-diag"
 diag_lines=()
@@ -42,7 +43,7 @@ extra_args=()
 if [[ -f "$diag" ]]; then
 	while IFS= read -r line || [[ -n "$line" ]]; do
 		case "$line" in
-			DK64_VR_*=* | RT64_VR_*=*) export "${line?}"; diag_lines+=("$line") ;;
+			DK64_VR_*=* | RT64_VR_*=* | TU_*=* | FD_*=* | MESA_*=* | VK_*=*) export "${line?}"; diag_lines+=("$line") ;;
 			ARGS=*) read -r -a extra_args <<< "${line#ARGS=}"; diag_lines+=("$line") ;;
 		esac
 	done < "$diag"

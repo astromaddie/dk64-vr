@@ -207,6 +207,28 @@ cinema 70.8-71.8 fps, 1-10 missed. Every 10 s window is within the earlier range
 27 missed. A first version that rendered the HUD in two extra full RT64 passes cost 2-4 ms of CPU per game
 frame and doubled the missed frames; the HUD now rides along in the left eye's pass at half resolution.
 
+### Performance work (branch `vr-perf`, running table)
+
+Unattended, off-head, Steam launch, DK Isles start position, 2160² an eye, display 72 Hz. GPU is
+RT64's passes an eye (timestamps), copy is the eye-to-swapchain copy an eye; fps and missed from
+`[vr-perf]` in gameplay. One run unless noted.
+
+| Step | GPU eye L / R | Copy | GPU a frame | fps | Missed / 10 s |
+| --- | --- | --- | --- | --- | --- |
+| Baseline (instrumented, unchanged behaviour) | 6.80 / 8.11 ms | 1.17 ms | 17.3 ms | 36 (half rate) | 0 |
+| Clears as load ops, read-only depth loads | 6.79 / 8.14 | 1.19 | 17.3 | 36 | 0 |
+| + far clip as a clip distance (no discard) | 6.05 / 7.17 | 1.17 | 15.6 | 36 | 0 |
+| + eye copy as a draw | 5.95 / 7.25 (4 runs, ±0.1) | 0.29 | 13.8 | 36 | 0 |
+| + uniform texture index for non-LOD draws | 4.96 / 5.15 | 0.30 | 10.7 | 69.5 | 18-26 |
+
+Findings: Turnip renders every pass in sysmem (TU_DEBUG=sysmem changes nothing; gmem is slower), so
+pass breaks (16 an eye, 14 of them decal depth switches) cost 0.01-0.05 ms each and are not the cost.
+The cost is fragment shading: forcing one point tap per texture (`RT64_VR_EXP_POINT`, a measurement
+only) gives 2.85 ms an eye, and so does dropping the non-uniform texture access everywhere (which is
+wrong for LOD draws). Adreno's non-uniform sample is the expensive part. The right eye's extra
+~1.2 ms is the compositor preempting whichever eye is rendered second (`RT64_VR_EYE_ORDER=swap`
+moves it to the left eye; the same camera or the same target for both eyes doesn't remove it).
+
 ## 6. Draw inventory
 
 | Item | VR rule |

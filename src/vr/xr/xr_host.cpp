@@ -67,6 +67,16 @@ const char *sceneName(int32_t scene) {
     return ((scene >= 0) && (scene < DK64VR_SCENE_COUNT)) ? names[scene] : "invalid";
 }
 
+// An on/off switch from the environment (vr-diag lines); unset keeps the default.
+bool envFlag(const char *name, bool fallback) {
+    const char *value = getenv(name);
+    if ((value == nullptr) || (value[0] == '\0')) {
+        return fallback;
+    }
+
+    return (value[0] != '0');
+}
+
 bool sceneIsStereo(int32_t scene) {
     return (scene == DK64VR_SCENE_GAMEPLAY) || (scene == DK64VR_SCENE_FIRST_PERSON) || (scene == DK64VR_SCENE_CUTSCENE);
 }
@@ -230,6 +240,15 @@ public:
         hooks.createDevice = &XrHost::hookCreateDevice;
         hooks.deviceCreated = &XrHost::hookDeviceCreated;
         plume::SetVulkanCreateHooks(hooks);
+
+        // Tiler-friendly render passes (Adreno): whole-target clears become load ops, so the
+        // driver's low-resolution Z stays usable; RT64_VR_DEFER_CLEARS=0 / RT64_VR_RO_DEPTH_LOAD=0
+        // turn them off for comparisons.
+        plume::VulkanPassOptions passOptions;
+        passOptions.deferFullClears = envFlag("RT64_VR_DEFER_CLEARS", true);
+        passOptions.loadReadOnlyDepth = envFlag("RT64_VR_RO_DEPTH_LOAD", true);
+        plume::SetVulkanPassOptions(passOptions);
+        dk64vr_logf("render passes: deferred clears %d, read-only depth load %d", int(passOptions.deferFullClears), int(passOptions.loadReadOnlyDepth));
         RT64::SetVrHost(this);
         if (setting("timing") != 0.0) {
             static const char *stageNames[] = { "wait", "frame", "end" };
@@ -506,6 +525,12 @@ public:
     }
 
     void eyeCamera(uint32_t eye, const float view[16], const float proj[16], float outView[16], float outProj[16]) override {
+        // RT64_VR_SAME_EYE=1: both eyes get the left eye's camera (diagnostics: equal images).
+        static const bool sameEye = envFlag("RT64_VR_SAME_EYE", false);
+        if (sameEye) {
+            eye = 0;
+        }
+
         Mat4 gameView = toMat4(view);
         const Mat4 gameProj = toMat4(proj);
         if (!cameraLogged && (eye == 0)) {
@@ -570,24 +595,38 @@ public:
         fromMat4(eyeProjection(eyeFov[eye], gameProj), outProj);
     }
 
-    void recordEye(uint32_t eye, plume::RenderCommandList *commandList, plume::RenderTexture *source, uint32_t width, uint32_t height) override {
+    plume::RenderFramebuffer *eyeFramebuffer(uint32_t eye, uint32_t *width, uint32_t *height) override {
+        if ((eye > 1) || !eyeChain[eye].acquired || eyeChain[eye].framebuffers.empty()) {
+            return nullptr;
+        }
+
+        Swapchain &chain = eyeChain[eye];
+        *width = chain.width;
+        *height = chain.height;
+        return chain.framebuffers[chain.index].get();
+    }
+
+    void recordEye(uint32_t eye, plume::RenderCommandList *commandList, plume::RenderTexture *source, uint32_t width, uint32_t height, bool drawn) override {
         Swapchain &chain = eyeChain[eye];
         if (!chain.acquired || (eye > 1)) {
             return;
         }
 
         plume::VulkanTexture *image = chain.textures[chain.index].get();
-        const uint32_t copyWidth = std::min(width, chain.width);
-        const uint32_t copyHeight = std::min(height, chain.height);
-        const plume::RenderTextureBarrier toCopy[] = {
-            plume::RenderTextureBarrier(source, plume::RenderTextureLayout::COPY_SOURCE),
-            plume::RenderTextureBarrier(image, plume::RenderTextureLayout::COPY_DEST)
-        };
-        commandList->barriers(plume::RenderBarrierStage::COPY, toCopy, 2);
+        if (!drawn) {
+            const uint32_t copyWidth = std::min(width, chain.width);
+            const uint32_t copyHeight = std::min(height, chain.height);
+            const plume::RenderTextureBarrier toCopy[] = {
+                plume::RenderTextureBarrier(source, plume::RenderTextureLayout::COPY_SOURCE),
+                plume::RenderTextureBarrier(image, plume::RenderTextureLayout::COPY_DEST)
+            };
+            commandList->barriers(plume::RenderBarrierStage::COPY, toCopy, 2);
 
-        const plume::RenderBox box(0, 0, int32_t(copyWidth), int32_t(copyHeight));
-        commandList->copyTextureRegion(plume::RenderTextureCopyLocation::Subresource(image), plume::RenderTextureCopyLocation::Subresource(source), 0, 0, 0, &box);
-        commandList->barriers(plume::RenderBarrierStage::GRAPHICS, plume::RenderTextureBarrier(source, plume::RenderTextureLayout::SHADER_READ));
+            const plume::RenderBox box(0, 0, int32_t(copyWidth), int32_t(copyHeight));
+            commandList->copyTextureRegion(plume::RenderTextureCopyLocation::Subresource(image), plume::RenderTextureCopyLocation::Subresource(source), 0, 0, 0, &box);
+            commandList->barriers(plume::RenderBarrierStage::GRAPHICS, plume::RenderTextureBarrier(source, plume::RenderTextureLayout::SHADER_READ));
+        }
+
         if (dumpDue) {
             recordReadback(commandList, image, chain, eyeReadback[eye], "vr-eye" + std::to_string(eye));
         }
@@ -654,10 +693,11 @@ public:
         }
     }
 
-    void eyeDone(uint32_t eye, double cpuMs, double gpuMs) override {
+    void eyeDone(uint32_t eye, const RT64::VrEyeStats &stats) override {
         if (eye < 2) {
-            eyeCpuMs[eye] = cpuMs;
-            eyeGpuMs[eye] = gpuMs;
+            eyeCpuMs[eye] = stats.cpuMs;
+            eyeGpuMs[eye] = stats.gpuMs;
+            eyeStats[eye] = stats;
             finishReadback(eyeReadback[eye]);
         }
     }
@@ -832,6 +872,25 @@ public:
             const float eyes[2] = { stereoShown ? float(eyeCpuMs[0]) : 0.0f, stereoShown ? float(eyeCpuMs[1]) : 0.0f };
             const float gpu = stereoShown ? float(eyeGpuMs[0] + eyeGpuMs[1]) : -1.0f;
             sfvr_perf_add_frame(&perf, nowS, missed ? 1 : 0, stages, eyes, gpu);
+            if (stereoShown) {
+                // Window sums of the eye passes' statistics (RT64::VrEyeStats), per eye.
+                statFrames++;
+                for (int e = 0; e < 2; e++) {
+                    const RT64::VrEyeStats &st = eyeStats[e];
+                    statSum[e][0] += st.gpuCopyMs;
+                    statSum[e][1] += st.recordMs;
+                    statSum[e][2] += st.renderPasses;
+                    statSum[e][3] += st.passMpx;
+                    statSum[e][4] += st.draws;
+                    statSum[e][5] += st.uberDraws;
+                    statSum[e][6] += st.decalDraws;
+                    statSum[e][7] += st.depthSwitches;
+                    statSum[e][8] += st.testZ;
+                    statSum[e][9] += st.clears;
+                    statSum[e][10] += st.gpuMs;
+                    statMax[e] = std::max(statMax[e], st.gpuMs + st.gpuCopyMs);
+                }
+            }
             char line[256];
             if (sfvr_perf_poll(&perf, nowS, line, sizeof(line))) {
                 const double windowS = nowS - perfWindowStartS;
@@ -839,6 +898,16 @@ public:
                     eyeChain[0].width, eyeChain[0].height, (windowS > 0.0) ? double(scheduler.arrivals - perfWindowArrivals) / windowS : 0.0, scheduler.rebases - perfWindowRebases,
                     hudPasses ? hudCpuSum / hudPasses : 0.0, hudPasses ? hudGpuSum / hudPasses : 0.0, hudPasses, hudSkipsSame, hudSkipsRate,
                     hudPartChanges[0], hudPartChanges[1], hudPartChanges[2], hudPartChanges[3], hudPartChanges[4], hudPartChanges[5], hudPartChanges[6]);
+                if (statFrames > 0) {
+                    const double n = double(statFrames);
+                    auto avg = [&](int e, int k) { return statSum[e][k] / n; };
+                    printf("[vr-perf] eyes gpu=%.2f/%.2f copy=%.2f/%.2f max=%.2f/%.2fms rec=%.2f/%.2fms passes=%.1f/%.1f mpx=%.1f/%.1f draws=%.0f uber=%.0f decal=%.0f dsw=%.1f/%.1f testz=%.1f clears=%.1f\n",
+                        avg(0, 10), avg(1, 10), avg(0, 0), avg(1, 0), statMax[0], statMax[1], avg(0, 1), avg(1, 1), avg(0, 2), avg(1, 2), avg(0, 3), avg(1, 3),
+                        avg(1, 4), avg(1, 5), avg(1, 6), avg(0, 7), avg(1, 7), avg(1, 8), avg(1, 9));
+                }
+                statFrames = 0;
+                std::fill(&statSum[0][0], &statSum[0][0] + 2 * 11, 0.0);
+                statMax[0] = statMax[1] = 0.0;
                 std::fill(std::begin(hudPartChanges), std::end(hudPartChanges), 0u);
                 hudCpuSum = hudGpuSum = 0.0;
                 hudPasses = 0;
@@ -2246,6 +2315,10 @@ private:
     }
     double eyeCpuMs[2] = {};
     double eyeGpuMs[2] = {};
+    RT64::VrEyeStats eyeStats[2];
+    uint64_t statFrames = 0;
+    double statSum[2][11] = {};
+    double statMax[2] = {};
 
     Pose origin;
     bool recentrePending = true;
