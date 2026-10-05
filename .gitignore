@@ -72,3 +72,5 @@ gamecontrollerdb.txt
 # Just linux things
 build.log
 DK64Recompiled
+# Native Linux builds made by tools/docker/build-linux.sh
+build-*/
