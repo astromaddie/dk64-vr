@@ -430,6 +430,42 @@ public:
         prevWeight = scheduler.weight(displayS - periodS);
     }
 
+    bool wantPlayerExtent(float center[3], float &radius) override {
+        // Once, a couple of seconds into play, around the player's position.
+        if (playerExtentLogged) {
+            return false;
+        }
+
+        const dk64vr_game_state state = gameState();
+        if ((state.frame == 0) || (state.scene != DK64VR_SCENE_GAMEPLAY)) {
+            gameplayFrames = 0;
+            return false;
+        }
+
+        if (++gameplayFrames < 60) {
+            return false;
+        }
+
+        center[0] = state.player_pos[0];
+        center[1] = state.player_pos[1];
+        center[2] = state.player_pos[2];
+        radius = 40.0f;
+        return true;
+    }
+
+    void playerExtent(float minY, float maxY, uint32_t vertexCount) override {
+        playerExtentLogged = true;
+        const dk64vr_game_state state = gameState();
+        if (vertexCount == 0) {
+            dk64vr_logf("player extent: no camera vertices within 40 units of the player at %.0f %.0f %.0f", state.player_pos[0], state.player_pos[1], state.player_pos[2]);
+            return;
+        }
+
+        const float worldScale = float(setting("world_scale"));
+        dk64vr_logf("player extent: y %.1f to %.1f (%.1f units, %u vertices within 40 units of the player at %.0f %.0f %.0f); %.2f m at world_scale %.0f",
+            minY, maxY, maxY - minY, vertexCount, state.player_pos[0], state.player_pos[1], state.player_pos[2], (maxY - minY) / worldScale, worldScale);
+    }
+
     void cameraGroups(uint32_t &primary, uint32_t &secondary) const override {
         primary = CameraGroup;
         secondary = CameraGroupSky;
@@ -1370,6 +1406,8 @@ private:
     bool cameraSeen = false;
     bool cameraLogged = false;
     bool stereoLatched = false;
+    bool playerExtentLogged = false;
+    uint32_t gameplayFrames = 0;
     uint32_t latchCount = 0;
     int32_t lastScene = DK64VR_SCENE_UNKNOWN;
 
