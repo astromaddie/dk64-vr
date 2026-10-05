@@ -227,6 +227,50 @@ The GPU sits at 903 MHz throughout at 2160²: GPU-bound (RT64's passes plus the 
 waits for its GPU work before the next is recorded, so the left eye's wall time also absorbs the
 compositor's GPU time. 120 Hz is out of reach as built.
 
+### Foveation design (2026-10-06; device-unverified)
+
+The coordinator's probe reports Adreno 750 / Turnip Mesa 26.3-devel, Vulkan 1.4:
+`VK_EXT_fragment_density_map` with non-subsampled images, but no dynamic density maps or fragment
+density invocation built-ins; `VK_KHR_fragment_shading_rate` with attachment, pipeline and primitive
+rates. Valve's implicit OpenXR/Vulkan FDM layer is loaded by SteamVR. Its symbols and strings show
+swapchain-size matching, render-pass/framebuffer injection, FB profiles, META eye centres, and
+`already_has_fdm`. These are evidence of possible behaviour, not a verified app contract.
+
+Two routes are viable:
+
+* **Valve injection:** enable `XR_FB_foveation`, `XR_FB_foveation_configuration`,
+  `XR_FB_swapchain_update_state`, `XR_FB_foveation_vulkan` (and optional META eye tracking); chain
+  `XrSwapchainCreateInfoFoveationFB` with the Vulkan foveation flag to each eye swapchain; create a
+  level/dynamic profile and apply `XrSwapchainStateFoveationFB` with `xrUpdateSwapchainFB`.
+  Vulkan foveation images can then be queried with `XrSwapchainImageFoveationVulkanFB`. An FB profile
+  alone does not prove that RT64's separate eye target receives it. Exact size matching or rendering
+  into the swapchain could make it eligible. The binary strings do not establish when it injects,
+  how it associates two independent eye passes with the profiles, or whether normal RT64 targets
+  remain sampleable. Size matching also cannot distinguish cinema renders of the same eye size.
+  Direct swapchain rendering would change RT64's authoritative left-eye framebuffer and acquisition
+  lifetime. This route needs the coordinator's `FDM_DEBUG` evidence before implementation decisions
+  can rely on it; it is not the selected backend.
+* **App-owned attachment:** EXT FDM on ordinary images would preserve RT64's sampling and copy paths
+  because the device supports `fragmentDensityMapNonSubsampledImages`. Subsampled images would need
+  special samplers and cannot retain the raw image-copy path. Non-dynamic FDM must be ready before
+  render-pass recording; moving it with gaze would require a completed upload ahead of the eye pass.
+  It also needs compatible FDM variants of graphics pipelines. The selected variant of this route is
+  **KHR fragment shading rate**, an R8_UINT rate attachment on explicitly selected eye passes.
+  It uses normal colour/depth images, existing pipelines with dynamic rate combiners, and uploads
+  the map in the same command list before rasterisation. Only the optional attachment needs a
+  render-pass-2 conversion in plume. This avoids an extra gaze-upload GPU wait and the unknown Valve
+  injection contract. It reduces fragment invocations; it does not reduce target memory, geometry,
+  framebuffer-copy bandwidth or compositor cost.
+
+The implementation remains off by default until a device A/B measures it. `foveation` is
+`off/low/medium/high`; `foveation_eye_tracked` is false by default. Pure map generation includes
+RT64 target padding, the asymmetric projection centre and tile coverage of the sharp disc.
+
+Primary contracts: [FB foveation](https://registry.khronos.org/OpenXR/specs/1.1/html/xrspec.html#XR_FB_foveation),
+[EXT density maps](https://docs.vulkan.org/samples/latest/samples/extensions/fragment_density_map/README.html),
+[KHR rate attachment](https://docs.vulkan.org/refpages/latest/refpages/source/VkFragmentShadingRateAttachmentInfoKHR.html),
+[dynamic combiners](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdSetFragmentShadingRateKHR.html).
+
 With the HUD split (2026-10-06, same conditions, 1728², several runs): gameplay with the HUD counters
 forced on every 5 s ran 69-72 fps with 0-27 missed frames per 10 s and 8.4-9.2 ms GPU; cutscenes in the
 cinema 70.8-71.8 fps, 1-10 missed. Every 10 s window is within the earlier range except one run at

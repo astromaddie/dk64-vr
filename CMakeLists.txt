@@ -394,6 +394,7 @@ target_sources(DK64Recompiled PRIVATE ${SOURCES})
 if (DK64_VR)
     set(DK64_VR_SOURCES
         ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_math.cpp
+        ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_foveation.cpp
         ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_sched.cpp
         ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_settings.c
         ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_log.c

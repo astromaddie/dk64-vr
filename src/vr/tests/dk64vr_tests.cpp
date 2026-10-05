@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "dk64vr_input.h"
+#include "dk64vr_foveation.h"
 #include "dk64vr_math.h"
 #include "dk64vr_sched.h"
 #include "dk64vr_settings.h"
@@ -391,6 +392,8 @@ static void testSettings() {
     CHECK_NEAR(dk64vr_settings_get(&s, "right_stick_x"), 0.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "cutscenes"), 0.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "level_pitch"), 1.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "foveation"), 0.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "foveation_eye_tracked"), 0.0, 0.0);
 
     // A file with a clamped value, a bad value, an unknown key and a comment.
     const char *text =
@@ -486,6 +489,78 @@ static void testSettings() {
     CHECK_NEAR(s.file_values[dk64vr_settings_index("cutscenes")], 2.0, 0.0);
     dk64vr_settings_free(&s);
     dk64vr_log_set_sink(nullptr);
+}
+
+static void testFoveation() {
+    const FovTangents symmetric = { -1, 1, 1, -1 };
+    CHECK_NEAR(projectionCentre(symmetric).x, 0.5, 1e-6);
+    CHECK_NEAR(projectionCentre(symmetric).y, 0.5, 1e-6);
+    const FovTangents asymmetric = { -2, 1, 1, -3 };
+    CHECK_NEAR(projectionCentre(asymmetric).x, 2.0 / 3.0, 1e-6);
+    CHECK_NEAR(projectionCentre(asymmetric).y, 0.25, 1e-6);
+    CHECK_NEAR(gazeCentre(asymmetric, { 0, 0, -1 }).x, projectionCentre(asymmetric).x, 1e-6);
+    CHECK_NEAR(gazeCentre(asymmetric, { 0, 0, -1 }).y, projectionCentre(asymmetric).y, 1e-6);
+    CHECK_NEAR(gazeCentre(asymmetric, { -2, 1, -1 }).x, 0, 1e-6);
+    CHECK_NEAR(gazeCentre(asymmetric, { -2, 1, -1 }).y, 0, 1e-6);
+    CHECK_NEAR(gazeCentre(asymmetric, { 1, -3, -1 }).x, 1, 1e-6);
+    CHECK_NEAR(gazeCentre(asymmetric, { 1, -3, -1 }).y, 1, 1e-6);
+    CHECK_NEAR(gazeCentre(asymmetric, { 1, 1, 1 }).x, projectionCentre(asymmetric).x, 1e-6);
+    CHECK_NEAR(gazeCentre(symmetric, { NAN, 0, -1 }).x, 0.5, 1e-6);
+    CHECK_NEAR(gazeCentre(symmetric, { 10, 10, -1 }).x, 1, 1e-6);
+    CHECK_NEAR(gazeCentre(symmetric, { 10, 10, -1 }).y, 0, 1e-6);
+    CHECK_NEAR(projectionCentre({ 0, 0, 0, 0 }).x, 0.5, 1e-6);
+
+    const uint16_t supported = (1u << 0) | (1u << 5) | (1u << 10); // 1x1, 2x2, 4x4
+    const auto off = makeShadingRateMap(2176, 2176, 2160, 2160, 32, 32, {}, FoveationLevel::Off, supported);
+    CHECK(off.width == 68 && off.height == 68);
+    CHECK(std::all_of(off.rates.begin(), off.rates.end(), [](uint8_t r) { return r == 0; }));
+    const auto high = makeShadingRateMap(2176, 2176, 2160, 2160, 32, 32, {}, FoveationLevel::High, supported);
+    CHECK(high.rates[0] == 10);
+    CHECK(high.rates[33 * high.width + 33] == 0);
+    const auto low = makeShadingRateMap(2176, 2176, 2160, 2160, 32, 32, {}, FoveationLevel::Low, supported);
+    const auto medium = makeShadingRateMap(2176, 2176, 2160, 2160, 32, 32, {}, FoveationLevel::Medium, supported);
+    CHECK(low.rates[0] == 5);
+    auto full = [](const ShadingRateMap &m) { return std::count(m.rates.begin(), m.rates.end(), 0); };
+    CHECK(full(low) > full(medium) && full(medium) > full(high));
+    // Every tile intersecting the inner disc stays full density, including its edge.
+    CHECK(high.rates[33 * high.width + 47] == 0);
+    const auto moved = makeShadingRateMap(2160, 2160, 2160, 2160, 32, 32, { 0.1f, 0.1f }, FoveationLevel::High, supported);
+    CHECK(moved.rates[6 * moved.width + 6] == 0);
+    CHECK(moved.rates[33 * moved.width + 33] == 10);
+    const auto fallback = makeShadingRateMap(100, 100, 100, 100, 16, 16, {}, FoveationLevel::High, (1u << 0) | (1u << 5));
+    CHECK(fallback.width == 7 && fallback.height == 7);
+    CHECK(std::all_of(fallback.rates.begin(), fallback.rates.end(), [](uint8_t r) { return r == 0 || r == 5; }));
+    const auto unsupported = makeShadingRateMap(100, 100, 100, 100, 16, 16, {}, FoveationLevel::High, 1);
+    CHECK(std::all_of(unsupported.rates.begin(), unsupported.rates.end(), [](uint8_t r) { return r == 0; }));
+    CHECK(makeShadingRateMap(0, 100, 100, 100, 16, 16, {}, FoveationLevel::High, supported).rates.empty());
+    const auto visualization = shadingRateVisualization(high);
+    CHECK(visualization.size() == high.rates.size() * 4);
+    CHECK(visualization[3] == 255 && visualization[1] == 130);
+
+    // New settings round-trip, repair bad enum names, and keep env overrides out of the file.
+    dk64vr_settings_t s = {};
+    dk64vr_settings_defaults(&s);
+    const char *text = "[vr]\nfoveation = high\nfoveation_eye_tracked = true\ndump_foveation = true\n";
+    dk64vr_settings_parse(&s, text, strlen(text));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 3, 0);
+    size_t length = 0;
+    char *formatted = dk64vr_settings_format(&s, &length);
+    dk64vr_settings_t roundTrip = {};
+    dk64vr_settings_defaults(&roundTrip);
+    CHECK(dk64vr_settings_parse(&roundTrip, formatted, length) == 0);
+    CHECK_NEAR(roundTrip.file_values[dk64vr_settings_index("foveation_eye_tracked")], 1, 0);
+    CHECK(dk64vr_settings_apply_env(&s, [](const char *name) -> const char * {
+        return strcmp(name, "DK64_VR_FOVEATION") == 0 ? "low" : nullptr;
+    }) == 1);
+    CHECK_NEAR(dk64vr_settings_get(&s, "foveation"), 1, 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 3, 0);
+    free(formatted);
+    dk64vr_settings_free(&roundTrip);
+    const char *bad = "[vr]\nfoveation = extreme\nfoveation_eye_tracked = maybe\n";
+    dk64vr_settings_parse(&s, bad, strlen(bad));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 0, 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation_eye_tracked")], 0, 0);
+    dk64vr_settings_free(&s);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -935,6 +1010,7 @@ int main() {
     testSchedulerStall();
     testSchedulerWeightEdges();
     testSettings();
+    testFoveation();
     testActionNamesUnique();
     testBindingPaths();
     testN64Map();

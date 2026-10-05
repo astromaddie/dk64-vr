@@ -10,9 +10,14 @@
 
 static const char *const right_stick_values[] = { "turn", "camera", NULL };
 static const char *const cutscene_values[] = { "cinema", "immersive", "panel", NULL };
+static const char *const foveation_values[] = { "off", "low", "medium", "high", NULL };
 
 // Keys that only this port has. The standard keys live in the sfvr registry.
 static const sfvr_setting_key port_keys[] = {
+	{ "foveation", SFVR_SETTING_ENUM, 0.0, 0.0, 3.0, foveation_values },
+	{ "foveation_eye_tracked", SFVR_SETTING_BOOL, 0.0, 0.0, 1.0, NULL },
+	// Dump the actual shading-rate attachment with the eye dumps (or once if dump_frame=0).
+	{ "dump_foveation", SFVR_SETTING_BOOL, 0.0, 0.0, 1.0, NULL },
 	// Game units per metre. Donkey Kong's model spans 25.2 units ([vr] player extent, DK Isles),
 	// so 15 makes him about 1.7 m tall; docs/VR_ARCHITECTURE.md section 5.
 	{ "world_scale", SFVR_SETTING_FLOAT, 15.0, 5.0, 100.0, NULL },
