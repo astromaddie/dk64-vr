@@ -11,10 +11,10 @@ Nothing here has been worn. Every row of the status table is headset-unverified.
 - Native Linux ARM64 title (SDL2 + Vulkan through RT64/plume), devkit title `DK64VR`, compat tool
   `SteamLinuxRuntime_4-arm64`. Persistent data in `$XDG_DATA_HOME`.
 - Display: the platform standard asks for 120 Hz at about 2160 x 2160 an eye. This port renders
-  1728 x 1728 an eye (`resolution_scale` 1.0) and holds 72 Hz there; 2160 was GPU-bound at 36 fps
-  (section 5b). That is the standard's heavy-port exception until the performance work lands. Set the
-  title's per-app rate in SteamVR to 72 Hz. sRGB swapchains are written through a UNORM view or
-  raw-copied.
+  2160 x 2160 an eye (`resolution_scale` 1.25) and holds 72 Hz there with no missed frames; the eye
+  passes take about 5.8 ms of GPU a frame (section 5b). 90 and 120 Hz are not measured yet: unattended
+  runs get the title's per-app rate, and DK64VR has no per-app entry (72 Hz off-head). Eye images
+  are drawn into the swapchain images through a UNORM view (bits unchanged).
 - Device (2026-10-05, read over SSH): Turnip Adreno 750, Vulkan 1.4, `dualSrcBlend`, descriptor
   indexing, `depthClamp`, `shaderInt64` (no `shaderFloat64`). RT64 needs dual-source blending.
 - ROM: the user's US 1.0 cartridge dump (sha1 cf806ff2...). Never committed.
@@ -128,7 +128,7 @@ reading is the clean one. To be settled at first wear.
 
 `vr.toml` in the app folder (`$APP_FOLDER_PATH`, `~/.local/share/DK64Recompiled` on the Frame), a
 `[vr]` table of the sfvr registry keys plus the port keys below; `DK64_VR_<KEY>` environment variables
-override it for the run. Port defaults: `refresh_rate` 120 (requested once through the FB extension,
+override it for the run. Port defaults: `refresh_rate` 72 (requested once through the FB extension,
 nearest offered rate), `resolution_scale` 1.25 (2160² from the recommended 1728²).
 
 | Port key | Default | Meaning |
@@ -141,7 +141,7 @@ nearest offered rate), `resolution_scale` 1.25 (2160² from the recommended 1728
 | `diag_exit_seconds` | 0 s | Quit cleanly this long after the session starts |
 | `dump_count`, `dump_interval`, `diag_yaw_step` | 1, 120, 0 | `dump_frame` repeats: e.g. 3, 300, 90 dumps yaw 0, 90 and 180 in one run |
 | `dump_panel_frame` | 0 | Dump the panel every Nth present (up to 40) |
-| `port_schema` | 3 | Migration marker: a file below 3 that still holds an old default takes the new one once (world_scale 25, resolution_scale 1.25, refresh_rate 120, hud_distance 2, snap_blink 0.15) |
+| `port_schema` | 4 | Migration marker: a file below 4 that still holds an old default takes the new one once (world_scale 25, resolution_scale 1.25 then 1.0, refresh_rate 120, hud_distance 2, snap_blink 0.15) |
 | `right_stick_x` | `turn` | `turn`: comfort turn (`turn_mode`, `snap_angle`, `smooth_turn_speed`); `camera`: the game's own C-left/C-right camera swing |
 | `move_from_view` | true | Left stick relative to where you look (`move_relative`: head, left or right hand) instead of the game camera |
 | `snap_blink` | 0 s | Optional black blink after a snap turn (the turn is instant without it) |
@@ -157,7 +157,7 @@ nearest offered rate), `resolution_scale` 1.25 (2160² from the recommended 1728
 Standard keys this port uses: `turn_mode` (snap), `snap_angle` (30), `smooth_turn_speed` (120),
 `move_relative` (head), `hud_distance` (1.5 m; port default), `hud_scale` (100: 40 degrees wide),
 `hud_visible`, `haptics` (0.6), `dominant_hand` (right: the pointer hand), `head_translation`,
-`refresh_rate` (72; port default), `resolution_scale` (1.0; port default). Not used yet: `vignette`,
+`refresh_rate` (72; port default), `resolution_scale` (1.25; port default). Not used yet: `vignette`,
 `roomscale`, `lean_limit`, `duck_crouch`, `height_offset`, `seated`, `horizon_lock`,
 `follow_vehicle_rotation`, `camera_shake`, `hud_mode` (only `near` exists).
 
@@ -184,10 +184,36 @@ is drawn. With dumps or `dump_panel_frame` on, `[vr] layers:` lines give every l
 image rectangle; `tools/steam_frame/composite.py` rebuilds what SteamVR composites for one eye from them
 and the dumps (numpy and Pillow). `RT64_VR_LOG_HUD=1` lists the HUD's draws every 300th game frame;
 `RT64_VR_HUD_DEBUG=1` shows the black and white HUD renders side by side instead of the solved image.
+`RT64_VR_LOG_HUD=<game frames>` lists the HUD's draws (with rects and scissors) that often.
+
+Performance diagnostics (vr-diag lines; `TU_*`, `FD_*`, `MESA_*` and `VK_*` driver variables pass
+through too, e.g. `TU_DEBUG=perf` for Turnip's LRZ reasons): with `timing`, a second `[vr-perf] eyes`
+line gives per eye (left/right) the GPU time of RT64's passes and of the eye copy, the worst frame,
+CPU record, submit and GPU-wait time, render passes begun and their area, draws, ubershader draws,
+decal draws, depth framebuffer switches, vertex depth tests and clears. `RT64_VR_PASS_TIMES=1`
+timestamps every render pass break twice a 1200 eye passes (`[vr-pass]`); `RT64_VR_LOG_DRAWS=1`
+lists one right-eye pass's draws (`[vr-draw]`). Switches, all on by default: `RT64_VR_DEFER_CLEARS`,
+`RT64_VR_RO_DEPTH_LOAD`, `RT64_VR_DEFER_WAIT`, `RT64_VR_HIDDEN_MASK` (=0 off),
+`RT64_VR_EYE_COPY=transfer` (the old copy). Measurement only: `RT64_VR_EXP_POINT=1` (point
+sampling), `RT64_VR_EYE_ORDER=swap`, `RT64_VR_RIGHT_TARGET=main`, `RT64_VR_SAME_EYE=1`.
 `[vr] input:` lines log each profile's suggest result, the action set attach, each hand's interaction
 profile and any change of held N64 buttons.
 
 ## 5b. Measured (unattended, off-head, Steam launch, 2026-10-06)
+
+Current build (branch `vr-perf`), three runs a setting, DK Isles start position, gameplay windows of
+10 s after the intro (the first one includes the transition), 72 Hz display:
+
+| Build | Eye | GPU a frame (passes + copy) | fps (min-max) | Missed / min, 3 runs | Cinema missed / min |
+| --- | --- | --- | --- | --- | --- |
+| Before (`vr-play`, 7c3ea340) | 2160² | 14.6 ms + 2.3 ms copy | 36 (half rate) | 15, 0, 16 (at 36 Hz) | 80-96 |
+| Before | 1728² | 8.4-8.5 ms + copy | 67.9-72.0 | 6.8, 15.8, 6.8 | 30-34 |
+| After | 2160² | 5.3 + 0.5 = 5.8 ms | 70.5-72.0 | 1.5, 0, 0 | 0 |
+| After | 1728² | 3.9 + 0.3 = 4.2 ms | 70.5-72.0 | 1.5, 0, 0 | 0 |
+
+The 1.5 a minute is one window of 10 missed frames at the cutscene-to-gameplay switch.
+
+Earlier measurements of the unchanged build:
 
 Display ran at 72 Hz off-head (the FB extension listed only 120). DK Isles gameplay, both eyes:
 
@@ -221,6 +247,14 @@ RT64's passes an eye (timestamps), copy is the eye-to-swapchain copy an eye; fps
 | + eye copy as a draw | 5.95 / 7.25 (4 runs, ±0.1) | 0.29 | 13.8 | 36 | 0 |
 | + uniform texture index for non-LOD draws | 4.96 / 5.15 | 0.30 | 10.7 | 69.5 | 18-26 |
 | + wave-uniform texture index for LOD draws | 2.90 / 2.87 | 0.31 | 6.4 | 72.0 | 0 |
+| + right eye not waited for (CPU only: right eye wall 4.1 to 0.6 ms) | 2.91 / 2.86 | 0.31 | 6.4 | 72.0 | 0 |
+| + hidden-area mask (15.7% of each eye) | 2.69 / 2.62 | 0.27 | 5.86 | 72.0 | 0 |
+
+Where the frame goes now (2160², per frame): the left eye's GPU wait is about 8.5 ms for 3 ms of its
+own work and the deferred right eye still runs 3 ms into the next frame, at a GPU clock pinned at
+903 MHz; at 1296² (2.9 ms of GPU) the left eye still waits 10 ms. That wait is SteamVR's pacing and
+its compositor sharing the GPU, not the eye passes, so the 72 Hz runs say nothing yet about the
+headroom at 90 or 120 Hz: that needs the title's per-app rate set to 90 or 120 and a Steam launch.
 
 Findings: Turnip renders every pass in sysmem (TU_DEBUG=sysmem changes nothing; gmem is slower), so
 pass breaks (16 an eye, 14 of them decal depth switches) cost 0.01-0.05 ms each and are not the cost.
@@ -235,6 +269,11 @@ HUD text clipped in the speech bubble (fixed): the flat output of the same momen
 text, centred. In the VR passes RT64 widened every projection with a viewport narrower than the frame
 by the eye's axis-scale ratio (4:3), so the text overran the game's own text-box scissor
 (27.75,65.75-164.5,145.5); `DrawParams::vrStretched` fixes it for eye and HUD passes.
+
+Parity: each lever's dumps were compared by eye with the previous build's at the same camera
+(decal shadows, fog, three-point filtering, sky, the HUD image): unchanged apart from DK's idle
+animation, the HUD fix above and the hidden-area corners (black, never shown by the lenses). Before
+and after at the same camera: `vr-perf` scratch `r01-base2160` vs `r23-parity` (not committed).
 
 ## 6. Draw inventory
 
@@ -393,5 +432,7 @@ library (not SSH). Claim the Frame as `user-wearing`. Read the log afterwards wi
   from SteamVR's own menu instead (that path is clean, also while paused).
 - First person: the crosshair follows the game camera's aim, but the head still looks around freely;
   untested.
-- Frame time is at the edge of 72 Hz (13.2-14.3 ms of 13.9); expect a few missed frames a second in busy
-  scenes.
+- Frame time at 2160² and 72 Hz is unproblematic in the measured scenes (DK Isles, the intro
+  cutscene); busier levels are unmeasured. 90 and 120 Hz have not been run.
+- The hidden-area mask blackens the eye image's periphery; a game effect that later reads the main
+  colour image (a pause snapshot) sees those corners black.
