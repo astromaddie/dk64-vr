@@ -409,6 +409,7 @@ public:
         synthetic = forceRender && !frameState.shouldRender;
         eyesRecorded[0] = eyesRecorded[1] = false;
         setPaused(!forceRender && !(focused && frameState.shouldRender), focused ? "headset in standby" : "focus lost");
+        checkDiagExit();
         if (!rendering) {
             updateInput(false);
             frameMode = RT64::VrFrame::Mode::Flat;
@@ -419,7 +420,6 @@ public:
 
         locateEyes();
         updateInput(true);
-        checkDiagExit();
         const double now = monotonicSeconds();
         probing = (setting("probe_seconds") > 0.0) && ((now - sessionStartS) < setting("probe_seconds"));
         updateStereoLatch();
@@ -1598,6 +1598,16 @@ private:
         {
             std::scoped_lock lock(inputMutex);
             latestInput = r;
+            // Diagnostic: Start held for 0.2 s at diag_start_at (the in-game pause menu).
+            const double startAt = setting("diag_start_at");
+            if ((startAt > 0.0) && (sinceStart >= startAt) && (sinceStart < startAt + 0.2)) {
+                if (!diagStartLogged) {
+                    diagStartLogged = true;
+                    dk64vr_logf("diag: pressing Start");
+                }
+
+                latestInput.buttons |= n64::Start;
+            }
         }
 
         // Action-state log for unattended runs (no wearer can press anything; the log shows the
@@ -2309,6 +2319,7 @@ private:
     } pointer;
     bool pointerDown = false;
     uint32_t diagMenuReads = 0;
+    bool diagStartLogged = false;
     double diagHudNextS = 0.0;
     double diagSnapNextS = 0.0;
     int diagSnapFrames = -1;

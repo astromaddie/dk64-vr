@@ -23,6 +23,10 @@ if ssh "${ssh_opts[@]}" "$host" 'journalctl --user --since "-2 min" --no-pager 2
 	echo "a session was FOCUSED in the last 2 minutes: someone may be wearing the headset"; exit 3
 fi
 
+if ssh "${ssh_opts[@]}" "$host" 'pgrep -x DK64Recompiled >/dev/null'; then
+	echo "DK64Recompiled is already running: Steam would not start the new run"; exit 3
+fi
+
 diag=""
 have_args=0
 for kv in "$@"; do
@@ -55,7 +59,7 @@ ssh "${ssh_opts[@]}" "$host" "printf 'steam://rungameid/%s\n' $gameid > ~/.steam
 sleep "$seconds"
 
 # Stop it if it is still running (its own container), then fetch.
-ssh "${ssh_opts[@]}" "$host" 'pid=$(pgrep -x DK64Recompiled | head -1); if [ -n "$pid" ]; then kill -TERM $pid; sleep 4; pgrep -x DK64Recompiled >/dev/null && echo "still running after TERM" || echo "stopped"; else echo "already exited"; fi'
+ssh "${ssh_opts[@]}" "$host" 'pid=$(pgrep -x DK64Recompiled | head -1); if [ -n "$pid" ]; then kill -TERM $pid; sleep 4; if pgrep -x DK64Recompiled >/dev/null; then echo "still running after TERM: killed"; kill -9 $pid; else echo "stopped by TERM"; fi; else echo "exited on its own"; fi'
 mkdir -p "$out"
 scp -q "${ssh_opts[@]}" "$host:devkit-game/$title/run-stdout.txt" "$out/run-stdout.txt" || true
 scp -q -r "${ssh_opts[@]}" "$host:$data/vr-dumps" "$out/" 2>/dev/null || true

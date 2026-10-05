@@ -63,6 +63,9 @@ static const sfvr_setting_key port_keys[] = {
 	// Diagnostic: a synthetic right hand aiming at the panel (a little right of and above its
 	// centre) whenever no tracked hand is, so the pointer layers can be dumped unattended.
 	{ "diag_pointer", SFVR_SETTING_BOOL, 0.0, 0.0, 1.0, NULL },
+	// Diagnostic: press Start for 0.2 s this many seconds after the session starts (the game's
+	// pause menu). 0 = off.
+	{ "diag_start_at", SFVR_SETTING_FLOAT, 0.0, 0.0, 3600.0, NULL },
 	// Diagnostic: show the game's HUD counters every N seconds of stereo play. 0 = off.
 	{ "diag_hud_seconds", SFVR_SETTING_FLOAT, 0.0, 0.0, 600.0, NULL },
 	// Diagnostic: a snap turn to the right every N seconds of stereo play, with the camera

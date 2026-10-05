@@ -19,7 +19,7 @@ extern "C" {
 // variables DK64_VR_<KEY> override the file for the run and are never
 // written back.
 
-#define DK64VR_SETTINGS_MAX_KEYS 64
+#define DK64VR_SETTINGS_MAX_KEYS 96
 
 typedef struct {
 	double values[DK64VR_SETTINGS_MAX_KEYS]; // effective: file value, then env override
