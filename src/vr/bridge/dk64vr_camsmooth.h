@@ -58,7 +58,11 @@ class CameraSmoother {
 public:
     // A new game frame's camera view. A jump past the limits, or forceCut, resets the history
     // and the follower to it. Returns true for a cut.
-    bool addTick(const Mat4 &view, bool forceCut = false);
+    bool addTick(const Mat4 &view, bool forceCut = false, const Vec3 *lookAt = nullptr);
+    // The look-at point uses the same tick history and interpolation weight as the camera:
+    // linear with Off, a quadratic B-spline otherwise. Cuts and resets clear both together.
+    bool focusReady() const { return haveFocus; }
+    Vec3 focus(float w, CameraSmoothing level) const;
     void reset();
     bool ready() const { return count > 0; }
     uint64_t cuts() const { return cutCount; }
@@ -83,6 +87,8 @@ private:
     static ViewPose lerpView(const ViewPose &a, const ViewPose &b, float t);
     ViewPose splinePose(float w) const;
 
+    Vec3 focusHist[3];
+    bool haveFocus = false;
     ViewPose hist[3];  // oldest, previous, newest
     int count = 0;
     uint64_t cutCount = 0;

@@ -127,10 +127,11 @@ perspective projection drawn there. The host (`XrHost::eyeCamera`) replaces:
   game's depth terms and scale, so z/w, the depth buffer and fog are unchanged
   (`dk64vr::eyeProjection`; with symmetric tangents it equals `guPerspective`, tested).
 
-The eye near plane is the game's (10 units, 0.4 m at 25 units/m), so no fog remap is applied;
-`dk64vr::fogRemap` (tested) is ready for a smaller near. Head pose comes only from the runtime: eye
+The eye near plane is the game's (10 units, 0.67 m at the default 15 units/m), so no fog remap
+is applied; `dk64vr::fogRemap` (tested) is ready for a smaller near. Head pose comes only from the runtime: eye
 poses relative to the head from `xrLocateViews`, head from the VIEW space, both in LOCAL space. The game
-camera is the head origin; the origin recentres on the first tracked frame and on
+camera supplies the head origin (with optional third-person offsets below); the origin recentres
+on the first tracked frame and on
 `XrEventDataReferenceSpaceChangePending` (yaw and position). The eye image is a stretched render of the
 whole 320x240 frame at eye size (resolution scale eyeW/320 x eyeH/240, aspect correction and hor+
 alignment off), so the eye FOV alone sets the frustum.
@@ -138,7 +139,56 @@ alignment off), so the eye FOV alone sets the frustum.
 World scale: `world_scale` 15 units per metre. Measured (2026-10-06, DK Isles, the `[vr] player
 extent` log): Donkey Kong's model spans 25.2 world units vertically, so he is about 1.7 m tall. Later
 runs of the same log gave 32-42 units because its 40-unit radius picks up props near the hut; the 25.2
-reading is the clean one. To be settled at first wear.
+reading is the clean one. The range is **4-100 units/m**; smaller numbers make the entire world
+bigger (DK: 1.68 m at 15, 3.15 m at 8, 6.30 m at 4). The minimum 4 permits 3.75x the default world
+size while retaining the original projection depth terms, near/far planes and float view pipeline.
+The derived menu readout is `dk64vr_settings_dk_height(settings)` = 25.2 / `world_scale`, labelled
+"DK height ≈ X m"; it is an estimate from that model, never a persisted setting. A line at start-up
+and once per effective value change says, for example,
+`[vr-cam] world_scale 8.0 (DK height ≈ 3.15 m) lower 0.50 closer 0.30`.
+
+Scale consumers (audited in `XrHost::eyeCamera`, `locateViews`, `hiddenMesh`, the quad builders and
+`CameraSmoother`):
+
+- Eye offsets/IPD and the recentred head-centre displacement both convert metres to game units
+  through the same `eyeView(..., world_scale)`. `head_translation` scales only the latter before
+  that conversion; runtime IPD is never edited.
+- Near/far and z/w stay in game units, so depth precision and the fog remap stay unchanged
+  (`fogRemap` is identity). The 10-unit near is 1.25 m at scale 8 and **2.5 m at scale 4**; large
+  worlds and very close cameras can visibly clip DK or nearby geometry. A smaller physical near
+  would need a production RSP fog remap (the pure helper alone is insufficient), so this change
+  deliberately preserves the game projection. Values below 4 are clamped.
+- HUD, panel and cinema dimensions/distances stay in runtime metres. Cinema's separation is derived
+  from runtime IPD and screen dimensions, independently of gameplay scale. Hidden-area triangles
+  remain FOV/NDC based; their projection and near-depth mask need no scale adjustment.
+- Hard-cut detection remains 60 **game units** / 0.9 rad: it detects source-camera discontinuities,
+  not physical head movement. Scaling that distance with `world_scale` would reset smoothing on
+  ordinary camera motion in the biggest worlds. Its physical size varies (4 m at 15, 15 m at 4).
+  Snap/smooth orbit distances and pivots remain game units; scale converts the final eye pose.
+
+Third-person camera settings (host-tested; **headset-unverified**): `camera_closer` (0-0.8) moves
+only the derived head origin along the smoothed game eye -> look-at line; `camera_lower` (0-1)
+then moves its remaining vertical separation toward the look-at height. For eye E, target A,
+closer C, lower L: P.xz = E.xz + C*(A.xz-E.xz), P.y = A.y + (1-C)*(1-L)*(E.y-A.y).
+Thus lower 1 is level with the target, closer 0.8 leaves 20% of the horizontal distance, and each
+coordinate stays between E and A. Defaults 0/0 bypass the offset correction completely (the
+composed view at world_scale 15 is byte-identical in host tests).
+
+The latest game-state focus is captured on each workload arrival and sampled with the camera's
+tick history and weight (linear with smoothing off, the same quadratic B-spline otherwise), resetting on the same hard cuts. One rigid offset correction
+is computed after smoothing and shared by all projections of both eyes, then snap/smooth turning
+orbits it about that sampled focus. Lowering adjusts inherited pitch toward the target; the
+orientation follower's heading remains, `level_pitch` still removes game pitch/roll, and tracked
+head pitch/translation and recentre compose last. Only `DK64VR_SCENE_GAMEPLAY` applies the offsets:
+first person, scripted cutscenes (including immersive), cinema, panels and frozen images retain
+their existing paths. The game camera, its camera collision and its input are never moved.
+
+There is no reliable host collision query for the adjusted head origin. The interpolation bound
+prevents passing the look-at point, but lowering can enter terrain and approaching DK can pass
+through intervening geometry or inside his model; physical head translation is also unclamped.
+The game-state snapshot can lead or lag the renderer workload by a frame (existing interface);
+focus/camera alignment also needs device observation. No wall/terrain safety or comfort acceptance
+is claimed. See [coordinator device check](VR_CAMERA_CHECK.md).
 
 `head_translation` scales the head's displacement from the recentre origin, never the eye offsets.
 
@@ -155,7 +205,9 @@ AxA -> BxB (xS, target 2160, max ...)`.
 
 | Port key | Default | Meaning |
 | --- | --- | --- |
-| `world_scale` | 25 | Game units per metre (5-100) |
+| `world_scale` | 15 | Game units per metre (4-100); DK height ≈ 25.2 / world_scale metres |
+| `camera_lower` | 0.0 | Third-person head origin toward the look-at height (0-1); `DK64_VR_CAMERA_LOWER` |
+| `camera_closer` | 0.0 | Third-person head origin along eye -> look-at (0-0.8); `DK64_VR_CAMERA_CLOSER` |
 | `level_pitch` | true | Drop the game camera's pitch and roll |
 | `panel_distance`, `panel_width` | 2.0, 2.2 m | The flat panel |
 | `diag_force_stereo` | false | Stereo whenever a camera projection exists, whatever the scene |
@@ -182,6 +234,11 @@ AxA -> BxB (xS, target 2160, max ...)`.
 | `diag_snap_seconds` | 0 s | A snap turn right every N s of play, with the game camera's and the shown heading logged for 12 frames |
 | `diag_hud_seconds` | 0 s | Show the game's HUD counters every N s of play (through its own `func_global_asm_806F8BC4`), with an eye and HUD dump half a second later |
 | `diag_start_at` | 0 s | Press Start for 0.2 s (the game's pause menu) |
+
+`camera_lower` and `camera_closer` are additive keys with zero defaults; expanding the scale range
+changes no defaults. `port_schema` remains 5, all earlier migrations are retained, and missing
+keys are added by the existing repair writer without resetting current user choices. Their env
+values (and `DK64_VR_WORLD_SCALE`) override only the current run and are never saved.
 
 Standard keys this port uses: `turn_mode` (snap; smooth orbits about Donkey Kong, section 8),
 `snap_angle` (45; port default, the user's choice), `smooth_turn_speed` (120),
@@ -249,12 +306,13 @@ at full speed. Code: `src/vr/bridge/dk64vr_camsmooth.*` (pure, host-tested), use
   Donkey Kong never drifts in the view.
 - One rigid correction a display frame: inverse(linear) x smoothed, where `linear` reproduces RT64's
   own interpolation (view rotation slerped, view translation lerped), applied to every camera
-  projection of both eyes before the snap-turn orbit, level pitch and the eye offsets. With
+  projection of both eyes before the optional lower/closer offset, snap-turn orbit, level pitch
+  and the eye offsets. With
   smoothing off the correction is the identity; the log's `match=` is the largest distance between
   RT64's view and the reproduction in a window.
 - Cuts reset the history and the follower to the new camera (no swoop): a scene change, a
-  flat/stereo or cinema change, a recomp menu, and any jump of more than 60 units (4 m) or 52
-  degrees between two game frames (map loads, respawns, cutscene cuts, first-person entry/exit,
+  flat/stereo or cinema change, a recomp menu, and any jump of more than 60 game units
+  (4 m at the default scale) or 52 degrees between two game frames (map loads, respawns, cutscene cuts, first-person entry/exit,
   warps). Never smoothed: first person (the crosshair is the game camera's aim) and the cinema (the
   authored picture on a screen). Snap turns and recentring are unchanged (the orbit applies after
   the correction).
@@ -501,6 +559,7 @@ logs and dumps (and composites rebuilt from them); it never pressed a button.
 | N64 pad merge, View short/hold, stick relative to the view | host-tested; not exercised on the device (no wearer) |
 | Snap turn (instant on screen, game camera follows) | verified unattended (`diag_snap_seconds`: shown heading moves 30 degrees in one frame, the game camera arrives in 4-6 s); 45 degree default and unwrapped orbit headset-unverified |
 | Smooth orbit about DK (`turn_mode` smooth) | verified unattended (`diag_turn_stick=1`: the shown heading turns at exactly the requested rate, 120 deg/s at full deflection, and stops on release); headset-unverified |
+| Larger world (`world_scale` 4-100), lower/closer origin (`camera_lower`, `camera_closer`) | host-tested (math, spline/cut/orbit composition, default byte parity, range/round-trip/env); headset-unverified; [device check](VR_CAMERA_CHECK.md) |
 | Camera smoothing (`camera_smoothing` medium) | host-tested; verified unattended (`[vr-cam]` before/after, section 5c); headset-unverified |
 | Transitions fade in stereo, pause/recomp menu over the frozen dimmed world | verified unattended (intro transitions freeze and fade, pause panel and recomp menu over the frozen world in the layer log); headset-unverified |
 | Hidden desktop window (no black SteamVR box at the launcher) | verified unattended (the `valve.steam.desktopgame.<appid>` overlay is no longer created; launcher and game run); headset-unverified |

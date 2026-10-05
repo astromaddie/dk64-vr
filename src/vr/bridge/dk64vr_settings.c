@@ -24,7 +24,10 @@ static const sfvr_setting_key port_keys[] = {
 	{ "dump_foveation", SFVR_SETTING_BOOL, 0.0, 0.0, 1.0, NULL },
 	// Game units per metre. Donkey Kong's model spans 25.2 units ([vr] player extent, DK Isles),
 	// so 15 makes him about 1.7 m tall; docs/VR_ARCHITECTURE.md section 5.
-	{ "world_scale", SFVR_SETTING_FLOAT, 15.0, 5.0, 100.0, NULL },
+	{ "world_scale", SFVR_SETTING_FLOAT, 15.0, 4.0, 100.0, NULL },
+	// Third-person head origin only; the game camera and its collision are unchanged.
+	{ "camera_lower", SFVR_SETTING_FLOAT, 0.0, 0.0, 1.0, NULL },
+	{ "camera_closer", SFVR_SETTING_FLOAT, 0.0, 0.0, 0.8, NULL },
 	// Schema of this port's keys (migrations in dk64vr_settings_parse): 2 moved world_scale 25 -> 15, resolution_scale 1.25 -> 1.0
 	// refresh_rate 120 -> 72 and hud_distance 2 -> 1.5 (files still holding the old defaults are migrated once).
 	// 3 turned snap_blink 0.15 -> 0. 4 moved resolution_scale 1.0 -> 1.25 (2160 an eye) after the
@@ -861,4 +864,9 @@ void dk64vr_settings_set(dk64vr_settings_t *s, const char *name, double value) {
 		value = sfvr_settings_clamp_float(k, (float)value);
 	}
 	s->values[index] = s->file_values[index] = value;
+}
+
+// Derived readout, never persisted: the clean DK Isles model measurement is 25.2 units.
+double dk64vr_settings_dk_height(const dk64vr_settings_t *s) {
+	return 25.2 / dk64vr_settings_get(s, "world_scale");
 }

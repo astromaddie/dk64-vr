@@ -75,6 +75,14 @@ Mat4 orbitView(const Mat4 &view, float targetHeadingRad, float pivotDistance, fl
 // The same orbit by an explicit angle (counter-clockwise from above, any size: smooth turning
 // can run a whole turn or more ahead of the game camera's ease).
 Mat4 orbitViewBy(const Mat4 &view, float deltaRad, float pivotDistance);
+// Orbit about an explicit world-space look-at target (used by the adjusted head origin).
+Mat4 orbitViewAround(const Mat4 &view, float deltaRad, const Vec3 &pivot);
+// Closer first along eye -> target, then lower the remaining height to the target. Every
+// coordinate stays between eye and target; no collision query. Zero settings return view
+// verbatim. Lowering adjusts the inherited pitch toward the target while preserving heading;
+// levelView still removes that pitch when level_pitch is on.
+Vec3 thirdPersonOrigin(const Vec3 &eye, const Vec3 &at, float lower, float closer);
+Mat4 thirdPersonView(const Mat4 &view, const Vec3 &at, float lower, float closer);
 float wrapAngle(float radians);  // to -pi..pi
 
 // 3D cinema (standard.md section 4, lessons 45 and 82). The game camera's picture goes on a

@@ -1428,6 +1428,213 @@ static void testSmoothTurn() {
     CHECK_NEAR(p.y, 30.0, 1e-3);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Adjustable third-person origin and world-size consistency (production bridge functions).
+
+static void testCameraOrigin() {
+    const Vec3 at = { 10, 20, -30 }, eye = { 90, 70, 150 };
+    const Mat4 view = guLookAt(eye, at, { 0, 1, 0 });
+    const Mat4 same = thirdPersonView(view, at, 0, 0);
+    CHECK(std::memcmp(&view, &same, sizeof(view)) == 0);
+    const Vec3 low = thirdPersonOrigin(eye, at, 1, 0);
+    CHECK_NEAR(low.x, eye.x, 0);
+    CHECK_NEAR(low.y, at.y, 0);
+    CHECK_NEAR(low.z, eye.z, 0);
+    const Vec3 close = thirdPersonOrigin(eye, at, 0, 0.8f);
+    CHECK_NEAR(close.x, eye.x + 0.8f * (at.x - eye.x), 1e-5);
+    CHECK_NEAR(close.y, eye.y + 0.8f * (at.y - eye.y), 1e-5);
+    CHECK_NEAR(close.z, eye.z + 0.8f * (at.z - eye.z), 1e-5);
+    CHECK_NEAR(thirdPersonOrigin(eye, at, 1, 0.8f).y, at.y, 1e-5);
+    // Re-aim inherited pitch when lowered; with level_pitch on the wearer still supplies pitch.
+    const Mat4 lowered = thirdPersonView(view, at, 0.5f, 0.3f);
+    const Vec3 atCamera = transformPoint(at, lowered);
+    CHECK_NEAR(atCamera.x, 0, 1e-4);
+    CHECK_NEAR(atCamera.y, 0, 1e-4);
+    CHECK(atCamera.z < 0);
+    CHECK_NEAR(cameraYaw(cameraPoseFromView(lowered)), cameraYaw(cameraPoseFromView(view)), 1e-5);
+    CHECK_NEAR(cameraPitch(cameraPoseFromView(levelView(lowered))), 0, 1e-6);
+    Pose head = { quatExp({ 0.2f, 0, 0 }), {} };
+    CHECK_NEAR(cameraPitch(cameraPoseFromView(eyeView(levelView(lowered), head, 15))), 0.2, 1e-5);
+
+    for (Vec3 shift : { Vec3{}, Vec3{ 10000, -3000, 9000 } }) {
+        for (Vec3 from : { eye, Vec3{ -90, -70, -150 }, at }) {
+            from = { from.x + shift.x, from.y + shift.y, from.z + shift.z };
+            const Vec3 target = { at.x + shift.x, at.y + shift.y, at.z + shift.z };
+            const Vec3 line = { target.x - from.x, target.y - from.y, target.z - from.z };
+            for (float lower : { 0.0f, 0.25f, 0.5f, 1.0f }) {
+                float prevDistance = INFINITY;
+                for (float closer : { 0.0f, 0.2f, 0.4f, 0.8f, 1.0f }) {
+                    const Vec3 origin = thirdPersonOrigin(from, target, lower, closer);
+                    const Vec3 remain = { target.x - origin.x, target.y - origin.y, target.z - origin.z };
+                    const float distance = dot(remain, remain);
+                    CHECK(distance <= prevDistance + 0.1f);
+                    prevDistance = distance;
+                    CHECK(dot(remain, line) >= -0.01f); // never crosses the target plane
+                    CHECK(origin.x >= std::min(from.x, target.x) && origin.x <= std::max(from.x, target.x));
+                    CHECK(origin.y >= std::min(from.y, target.y) && origin.y <= std::max(from.y, target.y));
+                    CHECK(origin.z >= std::min(from.z, target.z) && origin.z <= std::max(from.z, target.z));
+                    const Vec3 actual = viewPosition(thirdPersonView(guLookAt(from, { from.x, from.y, from.z - 1 }, { 0, 1, 0 }), target, lower, closer));
+                    CHECK_NEAR(actual.x, origin.x, 0.01);
+                    CHECK_NEAR(actual.y, origin.y, 0.01);
+                    CHECK_NEAR(actual.z, origin.z, 0.01);
+                }
+            }
+            float prevHeight = INFINITY;
+            for (int i = 0; i <= 10; i++) {
+                const Vec3 origin = thirdPersonOrigin(from, target, float(i) / 10, 0.3f);
+                const float height = std::fabs(origin.y - target.y);
+                CHECK(height <= prevHeight + 0.001f);
+                prevHeight = height;
+            }
+        }
+    }
+}
+
+static void testCameraOriginComposition() {
+    CameraSmoother smooth;
+    auto tick = [&smooth](float x, bool cut = false) {
+        const Vec3 eye = { x, 60, 150 }, at = { x + 10, 20, 0 };
+        smooth.addTick(guLookAt(eye, at, { 0, 1, 0 }), cut, &at);
+    };
+    tick(0); tick(10); tick(25);
+    for (CameraSmoothing level : { CameraSmoothing::Off, CameraSmoothing::Low, CameraSmoothing::Medium, CameraSmoothing::High }) {
+        for (float w : { 0.0f, 0.25f, 0.5f, 1.0f }) {
+            const Mat4 raw = smooth.linear(w), filtered = smooth.sample(w, 1.0f / 120, level);
+            const Vec3 focus = smooth.focus(w, level);
+            const Mat4 correction = mul(rigidInverse(raw), filtered);
+            const Mat4 corrected = mul(raw, correction);
+            const Mat4 adjusted = thirdPersonView(corrected, focus, 0.5f, 0.3f);
+            const Mat4 offset = mul(rigidInverse(corrected), adjusted);
+            CHECK(matNear(mul(corrected, offset), adjusted, 1e-4f));
+            for (float angle : { 0.0f, 0.5f, -1.5f, 7.0f }) {
+                const Mat4 turned = orbitViewAround(adjusted, angle, focus);
+                const Vec3 before = transformPoint(focus, adjusted), after = transformPoint(focus, turned);
+                CHECK_NEAR(after.x, before.x, 1e-4);
+                CHECK_NEAR(after.y, before.y, 1e-4);
+                CHECK_NEAR(after.z, before.z, 1e-4);
+                CHECK_NEAR(wrapAngle(viewHeading(turned) - viewHeading(adjusted) - angle), 0, 1e-5);
+                for (float units : { 4.0f, 8.0f, 15.0f, 100.0f }) {
+                    Pose left = { quatFromYaw(0.2f), { -0.032f, 0.1f, 0 } }, right = left;
+                    right.p.x = 0.032f;
+                    const Mat4 lv = eyeView(levelView(turned), left, units), rv = eyeView(levelView(turned), right, units);
+                    const Vec3 l = viewPosition(lv), r = viewPosition(rv);
+                    const Vec3 d = { r.x - l.x, r.y - l.y, r.z - l.z };
+                    CHECK_NEAR(std::sqrt(dot(d, d)) / units, 0.064, 2e-5);
+                }
+            }
+            // Exactly the old sequence at defaults, including both eyes and head/recentre pose.
+            Pose tracked = { quatMul(quatFromYaw(0.4f), quatExp({ 0.1f, 0, 0 })), { 0.03f, 0.2f, -0.1f } };
+            for (bool levelPitch : { false, true }) {
+                const Mat4 oldOrbit = orbitViewBy(corrected, 0.7f, 150);
+                const Mat4 newOrbit = orbitViewBy(thirdPersonView(corrected, focus, 0, 0), 0.7f, 150);
+                const Mat4 oldEye = eyeView(levelPitch ? levelView(oldOrbit) : oldOrbit, tracked, 15);
+                const Mat4 newEye = eyeView(levelPitch ? levelView(newOrbit) : newOrbit, tracked, 15);
+                CHECK(std::memcmp(&oldEye, &newEye, sizeof(oldEye)) == 0);
+            }
+        }
+    }
+    // The new origin inherits the spline's continuous position/velocity at a game tick boundary.
+    auto position = [&smooth](float w) {
+        return viewPosition(thirdPersonView(smooth.spline(w), smooth.focus(w, CameraSmoothing::Low), 0.5f, 0.3f));
+    };
+    const Vec3 end = position(1), before = position(0.99f);
+    tick(28);
+    const Vec3 start = position(0), after = position(0.01f);
+    CHECK_NEAR(start.x, end.x, 1e-4);
+    CHECK_NEAR((after.x - start.x) / 0.01f, (end.x - before.x) / 0.01f, 0.3);
+    // Cut to another region: both camera and focus reset without a swoop.
+    tick(5000, true);
+    for (float w : { 0.0f, 0.5f, 1.0f }) {
+        CHECK_NEAR(position(w).x, 5003, 0.01);
+        CHECK_NEAR(smooth.focus(w, CameraSmoothing::High).x, 5010, 0);
+    }
+    smooth.reset();
+    CHECK(!smooth.focusReady());
+}
+
+static void testWorldScaleConsumers() {
+    const Mat4 gameProj = guPerspective(45, 4.0f / 3, 10, 6000, 1);
+    const Mat4 projection = eyeProjection({ -1, 1, 1, -1 }, gameProj);
+    const Mat4 view = guLookAt({ 0, 30, 100 }, { 0, 10, 0 }, { 0, 1, 0 });
+    for (float units : { 4.0f, 8.0f, 15.0f, 100.0f }) {
+        Pose neutral, moved;
+        moved.p = { 0.1f, 0.2f, -0.3f };
+        const Vec3 a = viewPosition(eyeView(view, neutral, units)), b = viewPosition(eyeView(view, moved, units));
+        const Vec3 d = { b.x - a.x, b.y - a.y, b.z - a.z };
+        CHECK_NEAR(std::sqrt(dot(d, d)) / units, std::sqrt(0.14), 2e-5);
+        // Retaining game depth terms preserves fog and precision at every scale. The near is
+        // 10 game units (2.5 m at scale 4), so no fog remap or visibility-mask change is needed.
+        CHECK_NEAR(projection.m[2][2], gameProj.m[2][2], 0);
+        CHECK_NEAR(projection.m[3][2], gameProj.m[3][2], 0);
+        const FogRemap fog = fogRemap(gameProj, projection);
+        CHECK_NEAR(fog.a, 1, 1e-6); CHECK_NEAR(fog.b, 0, 1e-6);
+        CHECK_NEAR(depthToZw(projection, 10), -1, 1e-6);
+    }
+}
+
+static void testCameraOriginSettings() {
+    dk64vr_settings_t s = {};
+    dk64vr_settings_defaults(&s);
+    CHECK_NEAR(dk64vr_settings_get(&s, "camera_lower"), 0, 0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "camera_closer"), 0, 0);
+    CHECK_NEAR(dk64vr_settings_dk_height(&s), 1.68, 1e-9);
+    for (const char *key : { "camera_lower", "camera_closer" }) {
+        CHECK(dk64vr_settings_key(dk64vr_settings_index(key))->type == SFVR_SETTING_FLOAT);
+    }
+    const char *text = "version = 1\n[vr]\nport_schema = 5\nworld_scale = 8\ncamera_lower = 0.5\ncamera_closer = 0.3\nsnap_angle = 60\nfuture_key = 123\n";
+    dk64vr_settings_parse(&s, text, strlen(text));
+    for (size_t i = 0; i < dk64vr_settings_count(); i++) s.values[i] = s.file_values[i];
+    CHECK_NEAR(dk64vr_settings_dk_height(&s), 3.15, 1e-9);
+    CHECK_NEAR(dk64vr_settings_get(&s, "port_schema"), 5, 0); // additive keys: no default migration
+    size_t length;
+    char *formatted = dk64vr_settings_format(&s, &length);
+    CHECK(formatted != nullptr);
+    dk64vr_settings_t roundTrip = {};
+    dk64vr_settings_defaults(&roundTrip);
+    if (formatted) {
+        CHECK(std::strstr(formatted, "future_key = 123") != nullptr);
+        CHECK(dk64vr_settings_parse(&roundTrip, formatted, length) == 0);
+        for (size_t i = 0; i < dk64vr_settings_count(); i++) CHECK_NEAR(s.file_values[i], roundTrip.file_values[i], 1e-6);
+    }
+    std::free(formatted);
+    CHECK(dk64vr_settings_apply_env(&s, [](const char *key) -> const char * {
+        if (std::strcmp(key, "DK64_VR_WORLD_SCALE") == 0) return "4";
+        if (std::strcmp(key, "DK64_VR_CAMERA_LOWER") == 0) return "0.75";
+        if (std::strcmp(key, "DK64_VR_CAMERA_CLOSER") == 0) return "0.6";
+        return nullptr;
+    }) == 3);
+    CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 4, 0);
+    CHECK_NEAR(dk64vr_settings_dk_height(&s), 6.3, 1e-9);
+    CHECK_NEAR(dk64vr_settings_get(&s, "camera_lower"), 0.75, 1e-6);
+    CHECK_NEAR(dk64vr_settings_get(&s, "camera_closer"), 0.6, 1e-6);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 8, 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_lower")], 0.5, 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_closer")], 0.3, 1e-6);
+    for (const char *key : { "world_scale", "camera_lower", "camera_closer" }) {
+        const sfvr_setting_key *range = dk64vr_settings_key(dk64vr_settings_index(key));
+        dk64vr_settings_set(&s, key, -100);
+        CHECK_NEAR(dk64vr_settings_get(&s, key), range->min, 1e-6);
+        dk64vr_settings_set(&s, key, 1000);
+        CHECK_NEAR(dk64vr_settings_get(&s, key), range->max, 1e-6);
+    }
+    CHECK(dk64vr_settings_apply_env(&s, [](const char *key) -> const char * {
+        if (std::strcmp(key, "DK64_VR_WORLD_SCALE") == 0) return "-3";
+        if (std::strcmp(key, "DK64_VR_CAMERA_LOWER") == 0) return "2";
+        if (std::strcmp(key, "DK64_VR_CAMERA_CLOSER") == 0) return "9";
+        return nullptr;
+    }) == 3);
+    CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 4, 0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "camera_lower"), 1, 0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "camera_closer"), 0.8, 1e-6);
+    const char *invalid = "[vr]\nport_schema = 5\nworld_scale = 0\ncamera_lower = nan\ncamera_closer = 5\n";
+    dk64vr_settings_parse(&s, invalid, strlen(invalid));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 4, 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_lower")], 0, 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_closer")], 0.8, 1e-6);
+    dk64vr_settings_free(&s);
+    dk64vr_settings_free(&roundTrip);
+}
+
 int main() {
     testEyeProjectionMatchesGuPerspective();
     testEyeProjectionAsymmetricEdges();
@@ -1466,6 +1673,10 @@ int main() {
     testCameraSmoothingCuts();
     testCameraSmoothingWrap();
     testSmoothTurn();
+    testCameraOrigin();
+    testCameraOriginComposition();
+    testWorldScaleConsumers();
+    testCameraOriginSettings();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

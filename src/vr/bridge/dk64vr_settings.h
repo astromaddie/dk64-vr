@@ -64,6 +64,8 @@ bool dk64vr_settings_load(dk64vr_settings_t *s, const char *path);
 bool dk64vr_settings_save(const dk64vr_settings_t *s);
 
 double dk64vr_settings_get(const dk64vr_settings_t *s, const char *name); // effective value; 0 for an unknown name
+// Derived DK model height in metres for the settings menu (25.2 / world_scale).
+double dk64vr_settings_dk_height(const dk64vr_settings_t *s);
 void dk64vr_settings_set(dk64vr_settings_t *s, const char *name, double value); // clamps; sets effective and file value
 
 void dk64vr_settings_free(dk64vr_settings_t *s);

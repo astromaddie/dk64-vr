@@ -200,6 +200,10 @@ Mat4 orbitViewBy(const Mat4 &view, float d, float pivotDistance) {
         pivot.z += fz / flen * pivotDistance;
     }
 
+    return orbitViewAround(view, d, pivot);
+}
+
+Mat4 orbitViewAround(const Mat4 &view, float d, const Vec3 &pivot) {
     // W moves the camera by the rotation about +Y through the pivot (row vectors: v * W); the
     // new view is inverse(W) * view, i.e. points go through T(-pivot) R(-d) T(pivot) first.
     const float c = std::cos(-d), s = std::sin(-d);
@@ -216,6 +220,46 @@ Mat4 orbitViewBy(const Mat4 &view, float d, float pivotDistance) {
     back.m[3][1] = pivot.y;
     back.m[3][2] = pivot.z;
     return mul(mul(mul(toPivot, rot), back), view);
+}
+
+Vec3 thirdPersonOrigin(const Vec3 &eye, const Vec3 &at, float lower, float closer) {
+    lower = std::clamp(lower, 0.0f, 1.0f);
+    closer = std::clamp(closer, 0.0f, 0.8f);
+    if (lower == 0.0f && closer == 0.0f) {
+        return eye;
+    }
+    Vec3 p = { eye.x + closer * (at.x - eye.x), eye.y + closer * (at.y - eye.y), eye.z + closer * (at.z - eye.z) };
+    p.y += lower * (at.y - p.y);
+    return p;
+}
+
+Mat4 thirdPersonView(const Mat4 &view, const Vec3 &at, float lower, float closer) {
+    lower = std::clamp(lower, 0.0f, 1.0f);
+    closer = std::clamp(closer, 0.0f, 0.8f);
+    if (lower == 0.0f && closer == 0.0f) {
+        return view; // Preserve the complete default camera path, including float bits.
+    }
+    const Vec3 eye = viewPosition(view), p = thirdPersonOrigin(eye, at, lower, closer);
+    Mat4 out = view;
+    if (lower != 0.0f) {
+        const float dx = at.x - eye.x, dz = at.z - eye.z;
+        const float horizontal = std::sqrt(dx * dx + dz * dz);
+        if (horizontal > 1e-4f) {
+            const float oldPitch = std::atan2(at.y - eye.y, horizontal);
+            const float newPitch = std::atan2(at.y - p.y, horizontal * (1.0f - closer));
+            const float delta = newPitch - oldPitch;
+            Mat4 pitch;
+            pitch.m[1][1] = pitch.m[2][2] = std::cos(delta);
+            pitch.m[1][2] = -std::sin(delta);
+            pitch.m[2][1] = std::sin(delta);
+            out = mul(out, pitch);
+        }
+    }
+    // Retain the rotation (including the smoother's orientation follower), change its origin.
+    for (int j = 0; j < 3; j++) {
+        out.m[3][j] = -(p.x * out.m[0][j] + p.y * out.m[1][j] + p.z * out.m[2][j]);
+    }
+    return out;
 }
 
 FovTangents screenFov(const Pose &screen, float width, float height, const Vec3 &eye) {

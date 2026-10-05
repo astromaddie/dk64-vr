@@ -448,6 +448,7 @@ public:
 
         frameBegun = true;
         frameCount++;
+        logCameraSettings();
         displayS = double(frameState.predictedDisplayTime) * 1e-9;
         periodS = double(frameState.predictedDisplayPeriod) * 1e-9;
         scheduler.period_s = periodS;
@@ -510,7 +511,9 @@ public:
             const dk64vr_game_state state = gameState();
             const bool sceneCut = (state.frame != 0) && (state.scene != camTickScene);
             camTickScene = state.scene;
-            const bool cut = camSmoother.addTick(toMat4(info.cameraView), sceneCut);
+            // Snapshot focus alongside the workload camera, then sample it at display time.
+            const Vec3 lookAt = { state.cam_at[0], state.cam_at[1], state.cam_at[2] };
+            const bool cut = camSmoother.addTick(toMat4(info.cameraView), sceneCut, state.frame != 0 ? &lookAt : nullptr);
             if (cut) {
                 camWindowCuts++;
                 camRawStats.restart();
@@ -629,6 +632,9 @@ public:
         }
 
         gameView = mul(gameView, camCorrection);
+        if (camOffsetActive) {
+            gameView = mul(gameView, camOffsetCorrection);
+        }
 
         // Turning (snap or smooth): the view shows the target heading at once, orbited about the
         // game camera's look-at point by what the game camera still has to turn; the game eases
@@ -639,9 +645,15 @@ public:
         }
 
         if (turnShownDelta != 0.0f) {
-            const dk64vr_game_state state = gameState();
-            const float dx = state.cam_at[0] - state.cam_eye[0], dz = state.cam_at[2] - state.cam_eye[2];
-            gameView = orbitViewBy(gameView, turnShownDelta, std::sqrt(dx * dx + dz * dz));
+            if (camOffsetActive) {
+                // Keep DK's sampled look-at point fixed even with a shorter/lower orbit radius.
+                gameView = orbitViewAround(gameView, turnShownDelta, camFocus);
+            }
+            else {
+                const dk64vr_game_state state = gameState();
+                const float dx = state.cam_at[0] - state.cam_eye[0], dz = state.cam_at[2] - state.cam_eye[2];
+                gameView = orbitViewBy(gameView, turnShownDelta, std::sqrt(dx * dx + dz * dz));
+            }
         }
 
         if (eye == 0) {
@@ -1222,6 +1234,15 @@ private:
         return state;
     }
 
+    void logCameraSettings() {
+        const double values[] = { setting("world_scale"), setting("camera_lower"), setting("camera_closer") };
+        if (!cameraSettingsLogged || values[0] != cameraSettingsLast[0] || values[1] != cameraSettingsLast[1] || values[2] != cameraSettingsLast[2]) {
+            cameraSettingsLogged = true;
+            std::copy(values, values + 3, cameraSettingsLast);
+            dk64vr_logpf("[vr-cam]", "world_scale %.1f (DK height ≈ %.2f m) lower %.2f closer %.2f", values[0], dk64vr_settings_dk_height(&settings), values[1], values[2]);
+        }
+    }
+
     void logSettings() {
         char scaleText[16];
         if (setting("resolution_scale") == DK64VR_RESOLUTION_AUTO) {
@@ -1235,6 +1256,7 @@ private:
             setting("world_scale"), scaleText, cameraSmoothingName(CameraSmoothing(int(setting("camera_smoothing")))), int(setting("refresh_rate")), int(setting("level_pitch")), int(setting("force_render")),
             setting("diag_yaw"), int(setting("dump_frame")), setting("probe_seconds"), setting("diag_autostart"), setting("diag_exit_seconds"),
             int(setting("diag_force_stereo")), int(setting("timing")));
+        logCameraSettings();
         diagYawDeg = float(setting("diag_yaw"));
         nextDumpFrame = uint64_t(setting("dump_frame"));
     }
@@ -1867,6 +1889,8 @@ private:
         turnActive = false;
         turnDelta = turnShownDelta = turnReleaseFrom = 0.0f;
         camCorrection = Mat4();
+        camOffsetActive = false;
+        camOffsetCorrection = Mat4();
     }
 
     // Once per display frame, at its first camera projection: the correction from RT64's linear
@@ -1876,6 +1900,7 @@ private:
     void updateCameraCorrection(const Mat4 &firstView) {
         camCorrectionFrame = frameCount;
         camCorrection = Mat4();
+        camOffsetActive = false;
         if (!camSmoother.ready()) {
             camLastSampleS = displayS;
             return;
@@ -1894,6 +1919,22 @@ private:
         const Mat4 linearView = camSmoother.linear(w);
         const Mat4 smoothView = camSmoother.sample(w, dt, level);
         camCorrection = mul(rigidInverse(linearView), smoothView);
+
+        const dk64vr_game_state state = gameState();
+        const float lower = float(setting("camera_lower")), closer = float(setting("camera_closer"));
+        camOffsetActive = (state.scene == DK64VR_SCENE_GAMEPLAY) && camSmoother.focusReady() && (lower != 0.0f || closer != 0.0f);
+        if (camOffsetActive) {
+            camFocus = camSmoother.focus(w, level);
+            // One offset correction for every camera projection of both eyes. Apply AFTER
+            // smoothing, using the focus sampled with the same history/weight; no 30 Hz offset.
+            const Mat4 corrected = mul(firstView, camCorrection);
+            const Mat4 adjusted = thirdPersonView(corrected, camFocus, lower, closer);
+            camOffsetCorrection = mul(rigidInverse(corrected), adjusted);
+            if (setting("diag_camera_log") != 0.0) {
+                const Vec3 p = viewPosition(adjusted);
+                dk64vr_logpf("[vr-cam]", "origin f %" PRIu64 " focus %.2f %.2f %.2f adjusted %.2f %.2f %.2f", frameCount, camFocus.x, camFocus.y, camFocus.z, p.x, p.y, p.z);
+            }
+        }
 
         // Diagnostics: the linear (what smoothing off shows) and the smoothed camera's steps.
         const Pose raw = cameraPoseFromView(linearView), out = cameraPoseFromView(smoothView);
@@ -2749,6 +2790,8 @@ private:
     // State
 
     dk64vr_settings_t settings = {};
+    bool cameraSettingsLogged = false;
+    double cameraSettingsLast[3] = {};
     std::filesystem::path dataDir;
     bool installed = false;
     bool haveRefreshRate = false;
@@ -2872,6 +2915,9 @@ private:
     uint64_t shownStatsFrame = UINT64_MAX;
     bool diagTurnHeld = false;
     Mat4 camCorrection;
+    Mat4 camOffsetCorrection;
+    Vec3 camFocus;
+    bool camOffsetActive = false;
     uint64_t camCorrectionFrame = UINT64_MAX;
     double camLastSampleS = 0.0;
     int32_t camTickScene = DK64VR_SCENE_UNKNOWN;

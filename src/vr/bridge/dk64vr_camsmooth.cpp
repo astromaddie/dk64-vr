@@ -152,17 +152,33 @@ CameraSmoother::ViewPose CameraSmoother::lerpView(const ViewPose &a, const ViewP
 
 void CameraSmoother::reset() {
     count = 0;
+    haveFocus = false;
     followerValid = false;
     followerVel = {};
 }
 
-bool CameraSmoother::addTick(const Mat4 &view, bool forceCut) {
+bool CameraSmoother::addTick(const Mat4 &view, bool forceCut, const Vec3 *lookAt) {
     const ViewPose v = fromView(view);
     bool cut = forceCut;
     if (count > 0) {
         const Pose a = cameraPoseFromView(view), b = cameraPoseFromView(toView(hist[2]));
         const Vec3 d = { a.p.x - b.p.x, a.p.y - b.p.y, a.p.z - b.p.z };
         cut = cut || (length3(d) > limits.distance) || (quatAngle(a.q, b.q) > limits.angle);
+    }
+
+    if (lookAt != nullptr) {
+        if (!haveFocus || count == 0 || cut) {
+            focusHist[0] = focusHist[1] = focusHist[2] = *lookAt;
+        }
+        else {
+            focusHist[0] = focusHist[1];
+            focusHist[1] = focusHist[2];
+            focusHist[2] = *lookAt;
+        }
+        haveFocus = true;
+    }
+    else {
+        haveFocus = false;
     }
 
     if ((count == 0) || cut) {
@@ -181,6 +197,17 @@ bool CameraSmoother::addTick(const Mat4 &view, bool forceCut) {
     hist[1] = hist[2];
     hist[2] = v;
     return false;
+}
+
+Vec3 CameraSmoother::focus(float w, CameraSmoothing level) const {
+    if (!haveFocus) {
+        return {};
+    }
+    w = std::clamp(w, 0.0f, 1.0f);
+    if (level == CameraSmoothing::Off) {
+        return lerp3(focusHist[1], focusHist[2], w);
+    }
+    return lerp3(lerp3(focusHist[0], focusHist[1], 0.5f + 0.5f * w), lerp3(focusHist[1], focusHist[2], 0.5f * w), w);
 }
 
 Mat4 CameraSmoother::linear(float w) const {
