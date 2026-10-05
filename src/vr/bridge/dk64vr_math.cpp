@@ -248,11 +248,15 @@ Mat4 thirdPersonView(const Mat4 &view, const Vec3 &at, float lower, float closer
             const float oldPitch = std::atan2(at.y - eye.y, horizontal);
             const float newPitch = std::atan2(at.y - p.y, horizontal * (1.0f - closer));
             const float delta = newPitch - oldPitch;
-            Mat4 pitch;
-            pitch.m[1][1] = pitch.m[2][2] = std::cos(delta);
-            pitch.m[1][2] = -std::sin(delta);
-            pitch.m[2][1] = std::sin(delta);
-            out = mul(out, pitch);
+            // Pitch about the horizontal right axis in WORLD space. A local-X pitch would
+            // change heading when the smoothed camera carries roll, even with level_pitch on.
+            const Mat4 camera = rigidInverse(view);
+            const Vec3 right = normalize({ camera.m[2][2], 0.0f, -camera.m[2][0] });
+            if (dot(right, right) > 0.5f) {
+                const float s = std::sin(0.5f * delta);
+                const Quat pitch = { right.x * s, 0.0f, right.z * s, std::cos(0.5f * delta) };
+                out = mul(rigidInverse(poseMatrix(Pose { pitch, {} })), out);
+            }
         }
     }
     // Retain the rotation (including the smoother's orientation follower), change its origin.

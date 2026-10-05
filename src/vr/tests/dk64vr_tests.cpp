@@ -1456,6 +1456,18 @@ static void testCameraOrigin() {
     Pose head = { quatExp({ 0.2f, 0, 0 }), {} };
     CHECK_NEAR(cameraPitch(cameraPoseFromView(eyeView(levelView(lowered), head, 15))), 0.2, 1e-5);
 
+    // A rolled camera (including incidental roll from orientation interpolation) must not
+    // gain a yaw step when lowering changes inherited pitch.
+    Pose rolled = { quatMul(quatMul(quatFromYaw(0.7f), quatExp({ -0.4f, 0, 0 })), quatExp({ 0, 0, 0.3f })), eye };
+    const Vec3 rolledAt = transformPoint({ 0, 0, -150 }, poseMatrix(rolled));
+    const Mat4 rolledView = viewFromCameraPose(rolled);
+    const Mat4 rolledLow = thirdPersonView(rolledView, rolledAt, 0.6f, 0.3f);
+    CHECK_NEAR(viewHeading(rolledLow), viewHeading(rolledView), 1e-5);
+    CHECK_NEAR(viewHeading(levelView(rolledLow)), viewHeading(levelView(rolledView)), 1e-5);
+    const Vec3 rolledFocus = transformPoint(rolledAt, rolledLow);
+    CHECK_NEAR(rolledFocus.x, 0, 1e-4);
+    CHECK_NEAR(rolledFocus.y, 0, 1e-4);
+
     for (Vec3 shift : { Vec3{}, Vec3{ 10000, -3000, 9000 } }) {
         for (Vec3 from : { eye, Vec3{ -90, -70, -150 }, at }) {
             from = { from.x + shift.x, from.y + shift.y, from.z + shift.z };
