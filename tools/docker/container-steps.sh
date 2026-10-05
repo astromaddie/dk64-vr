@@ -84,6 +84,8 @@ step_smoke() {
 	trap 'rm -rf "$data"' EXIT
 	[ -z "${ROM_FILE:-}" ] || cp "$ROM_FILE" "$data/DK64.z64"
 	cd "$out"
+	# The game aborts when the X server goes away; do not leave a core file in the package.
+	ulimit -c 0
 	set +e
 	APP_FOLDER_PATH="$data" SDL_AUDIODRIVER=dummy SDL_VIDEODRIVER=x11 \
 		timeout "${SMOKE_SECONDS:-25}" xvfb-run -a -s '-screen 0 1280x720x24' ./DK64Recompiled 2>&1 | tail -40
