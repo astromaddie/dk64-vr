@@ -78,3 +78,5 @@ osStartThread_recomp = 0x8F000150;
 recomp_run_ui_callbacks = 0x8F000154;
 recomp_get_gyro_inverted_axes = 0x8F000158;
 recomp_get_mouse_inverted_axes = 0x8F00015C;
+recomp_vr_is_active = 0x8F000160;
+recomp_vr_publish_game_state = 0x8F000164;
