@@ -35,6 +35,7 @@ static uint8_t supportedRate(uint32_t desiredArea, uint16_t supported) {
     uint32_t area = 1;
     for (uint8_t x = 0; x <= 2; x++) {
         for (uint8_t y = 0; y <= 2; y++) {
+            if (desiredArea <= 4 && (x > 1 || y > 1)) continue;
             const uint8_t code = (x << 2) | y;
             const uint32_t a = 1u << (x + y);
             if ((supported & (1u << code)) && a <= desiredArea && (a > area || (a == area && x == y))) {

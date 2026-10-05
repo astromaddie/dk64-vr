@@ -24,7 +24,7 @@ XrActionType xrType(ActionKind kind) {
 
 }
 
-bool XrInput::create(XrInstance xrInstance, XrSession xrSession, bool frameProfile) {
+bool XrInput::create(XrInstance xrInstance, XrSession xrSession, bool frameProfile, bool eyeGaze) {
     instance = xrInstance;
     session = xrSession;
     XrActionSetCreateInfo setInfo = { XR_TYPE_ACTION_SET_CREATE_INFO };
@@ -93,6 +93,30 @@ bool XrInput::create(XrInstance xrInstance, XrSession xrSession, bool frameProfi
         xrCreateActionSpace(session, &spaceInfo, &aimSpace[hand]);
     }
 
+    if (eyeGaze) {
+        XrActionCreateInfo action = { XR_TYPE_ACTION_CREATE_INFO };
+        action.actionType = XR_ACTION_TYPE_POSE_INPUT;
+        strcpy(action.actionName, "foveation_gaze");
+        strcpy(action.localizedActionName, "Foveation gaze");
+        res = xrCreateAction(actionSet, &action, &gazeAction);
+        if (XR_SUCCEEDED(res)) {
+            XrActionSuggestedBinding binding = { gazeAction, XR_NULL_PATH };
+            XrInteractionProfileSuggestedBinding suggested = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
+            res = xrStringToPath(instance, "/user/eyes_ext/input/gaze_ext/pose", &binding.binding);
+            if (XR_SUCCEEDED(res)) res = xrStringToPath(instance, "/interaction_profiles/ext/eye_gaze_interaction", &suggested.interactionProfile);
+            suggested.countSuggestedBindings = 1;
+            suggested.suggestedBindings = &binding;
+            if (XR_SUCCEEDED(res)) res = xrSuggestInteractionProfileBindings(instance, &suggested);
+            if (XR_SUCCEEDED(res)) {
+                XrActionSpaceCreateInfo spaceInfo = { XR_TYPE_ACTION_SPACE_CREATE_INFO };
+                spaceInfo.action = gazeAction;
+                spaceInfo.poseInActionSpace.orientation.w = 1.0f;
+                res = xrCreateActionSpace(session, &spaceInfo, &gazeSpace);
+            }
+        }
+        dk64vr_logpf("[vr-fov]", "eye-gaze action=%s result=%d (invalid/inactive gaze falls back to fixed)", XR_SUCCEEDED(res) ? "bound" : "unavailable", int(res));
+    }
+
     XrSessionActionSetsAttachInfo attach = { XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
     attach.countActionSets = 1;
     attach.actionSets = &actionSet;
@@ -108,6 +132,10 @@ bool XrInput::create(XrInstance xrInstance, XrSession xrSession, bool frameProfi
 }
 
 void XrInput::destroy() {
+    if (gazeSpace != XR_NULL_HANDLE) xrDestroySpace(gazeSpace);
+    gazeSpace = XR_NULL_HANDLE;
+    gazeAction = XR_NULL_HANDLE;
+    gazeValid = false;
     for (int hand = 0; hand < 2; hand++) {
         if (aimSpace[hand] != XR_NULL_HANDLE) {
             xrDestroySpace(aimSpace[hand]);
@@ -173,6 +201,7 @@ void XrInput::logProfiles() {
 InputSample XrInput::sample(bool focused, XrSpace space, XrTime time) {
     InputSample s;
     aimValid[0] = aimValid[1] = false;
+    gazeValid = false;
     if (!focused || (actionSet == XR_NULL_HANDLE)) {
         return s;
     }
@@ -218,6 +247,20 @@ InputSample XrInput::sample(bool focused, XrSpace space, XrTime time) {
             aimValid[hand] = (location.locationFlags & needed) == needed;
             aim[hand].q = { location.pose.orientation.x, location.pose.orientation.y, location.pose.orientation.z, location.pose.orientation.w };
             aim[hand].p = { location.pose.position.x, location.pose.position.y, location.pose.position.z };
+        }
+    }
+
+    if (gazeAction != XR_NULL_HANDLE && gazeSpace != XR_NULL_HANDLE) {
+        XrActionStateGetInfo info = { XR_TYPE_ACTION_STATE_GET_INFO };
+        info.action = gazeAction;
+        XrActionStatePose state = { XR_TYPE_ACTION_STATE_POSE };
+        XrSpaceLocation location = { XR_TYPE_SPACE_LOCATION };
+        if (XR_SUCCEEDED(xrGetActionStatePose(session, &info, &state)) && state.isActive
+            && XR_SUCCEEDED(xrLocateSpace(gazeSpace, space, time, &location))) {
+            const XrSpaceLocationFlags needed = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+            gazeValid = (location.locationFlags & needed) == needed;
+            gaze = { { location.pose.orientation.x, location.pose.orientation.y, location.pose.orientation.z, location.pose.orientation.w },
+                { location.pose.position.x, location.pose.position.y, location.pose.position.z } };
         }
     }
 

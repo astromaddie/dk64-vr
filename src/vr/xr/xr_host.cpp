@@ -14,6 +14,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -39,6 +40,7 @@
 #include "sfvr/sfvr_perf.h"
 #include "../diag/dk64vr_diag.h"
 #include "xr_input.h"
+#include "xr_foveation.h"
 
 #include <SDL.h>
 #include "recompui/recompui.h"
@@ -150,6 +152,13 @@ public:
         dk64vr_settings_load(&settings, settingsPath.c_str());
         logSettings();
 
+        // Establish this before the loader enumerates implicit API layers or creates Vulkan.
+        // Explicit 0 is a Valve-only diagnostic run; FDM and KHR rate features cannot coexist.
+        const char *disableFdm = std::getenv("DISABLE_VULKAN_FDM_INJECTION_LAYER");
+        valveFdmDisabled = disableFdm == nullptr || strcmp(disableFdm, "0") != 0;
+        if (valveFdmDisabled) setenv("DISABLE_VULKAN_FDM_INJECTION_LAYER", "1", 1);
+        else unsetenv("DISABLE_VULKAN_FDM_INJECTION_LAYER"); // some implicit-layer loaders test presence, not the value
+
         uint32_t extensionCount = 0;
         if (XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &extensionCount, nullptr))) {
             dk64vr_logpf("[openxr]", "no OpenXR runtime; VR mode off");
@@ -164,6 +173,7 @@ public:
             haveRefreshRate = haveRefreshRate || (strcmp(e.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0);
             haveFrameProfile = haveFrameProfile || (strcmp(e.extensionName, "XR_VALVE_frame_controller_interaction") == 0);
             haveVisibilityMask = haveVisibilityMask || (strcmp(e.extensionName, XR_KHR_VISIBILITY_MASK_EXTENSION_NAME) == 0);
+            haveEyeGaze = haveEyeGaze || (strcmp(e.extensionName, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME) == 0);
         }
 
         if (!haveVulkan2) {
@@ -180,6 +190,8 @@ public:
         if (haveFrameProfile) {
             enabled.push_back("XR_VALVE_frame_controller_interaction");
         }
+        haveEyeGaze = haveEyeGaze && setting("foveation_eye_tracked") != 0.0 && setting("foveation") != 0.0 && valveFdmDisabled;
+        if (haveEyeGaze) enabled.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
 
         // The hidden-area mesh, masked out of the eye passes before their scene (lesson 51).
         if (haveVisibilityMask) {
@@ -212,7 +224,12 @@ public:
         }
 
         XrSystemProperties systemProps = { XR_TYPE_SYSTEM_PROPERTIES };
+        XrSystemEyeGazeInteractionPropertiesEXT gazeProperties = { XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT };
+        if (haveEyeGaze) systemProps.next = &gazeProperties;
         xrGetSystemProperties(instance, systemId, &systemProps);
+        haveEyeGaze = haveEyeGaze && gazeProperties.supportsEyeGazeInteraction;
+        dk64vr_logpf("[vr-fov]", "eye_tracked_requested=%d XR_EXT_eye_gaze_interaction=%s XR_FB_foveation=not-enabled XR_META_foveation_eye_tracked=not-enabled FDM_DEBUG=%s",
+            int(setting("foveation_eye_tracked")), haveEyeGaze ? "enabled-supported" : "unavailable-or-not-requested", std::getenv("FDM_DEBUG") ? std::getenv("FDM_DEBUG") : "unset");
         dk64vr_logpf("[openxr]", "runtime %s %u.%u.%u, system %s, refresh-rate extension %s, Frame controller profile %s", instanceProps.runtimeName,
             XR_VERSION_MAJOR(instanceProps.runtimeVersion), XR_VERSION_MINOR(instanceProps.runtimeVersion), XR_VERSION_PATCH(instanceProps.runtimeVersion),
             systemProps.systemName, haveRefreshRate ? "yes" : "no", haveFrameProfile ? "yes" : "no");
@@ -359,11 +376,13 @@ public:
 
     static VkResult hookCreateDevice(void *user, VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *createInfo, VkDevice *device) {
         XrHost *self = static_cast<XrHost *>(user);
+        VkDeviceCreateInfo prepared;
+        self->foveation.prepareDevice(physicalDevice, *createInfo, prepared, FoveationLevel(int(self->setting("foveation"))), self->valveFdmDisabled);
         XrVulkanDeviceCreateInfoKHR info = { XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR };
         info.systemId = self->systemId;
         info.pfnGetInstanceProcAddr = vkGetInstanceProcAddr;
         info.vulkanPhysicalDevice = physicalDevice;
-        info.vulkanCreateInfo = createInfo;
+        info.vulkanCreateInfo = &prepared;
         VkResult vkResult = VK_ERROR_INITIALIZATION_FAILED;
         XrResult res = self->createVulkanDevice(self->instance, &info, device, &vkResult);
         if (XR_FAILED(res)) {
@@ -377,6 +396,7 @@ public:
     static void hookDeviceCreated(void *user, plume::VulkanDevice *device) {
         XrHost *self = static_cast<XrHost *>(user);
         self->device = device;
+        self->foveation.deviceCreated(device);
         self->queueFamily = device->queueFamilyIndices[0];  // DIRECT
         self->queueMutex = plume::GetVulkanQueueMutex(device, self->queueFamily, 0);
         dk64vr_logpf("[openxr]", "device %s, queue family %u queue 0 shared with the runtime", device->description.name.c_str(), self->queueFamily);
@@ -437,6 +457,7 @@ public:
         rendering = frameState.shouldRender || forceRender;
         synthetic = forceRender && !frameState.shouldRender;
         eyesRecorded[0] = eyesRecorded[1] = false;
+        foveatedEye[0] = foveatedEye[1] = false;
         setPaused(!forceRender && !(focused && frameState.shouldRender), focused ? "headset in standby" : "focus lost");
         checkDiagExit();
         if (!rendering) {
@@ -700,6 +721,35 @@ public:
 
         commandList->barriers(plume::RenderBarrierStage::GRAPHICS, plume::RenderTextureBarrier(image, plume::RenderTextureLayout::COLOR_WRITE));
         eyesRecorded[eye] = true;
+        if (setting("dump_foveation") != 0.0 && (dumpDue || !foveationDumped[eye])) {
+            std::error_code ec;
+            std::filesystem::create_directories(dataDir / "vr-dumps", ec);
+            const std::string name = "vr-fov-eye" + std::to_string(eye) + "-" + std::to_string(dumpsDone) + ".png";
+            foveation.dump(eye, width, height, (dataDir / "vr-dumps" / name).string(), foveatedEye[eye]);
+            foveationDumped[eye] = true;
+        }
+    }
+
+    plume::RenderFramebuffer *foveatedFramebuffer(uint32_t eye, plume::RenderCommandList *commands, plume::RenderFramebuffer *framebuffer) override {
+        if (eye >= 2 || cinemaActive || frameMode != RT64::VrFrame::Mode::Stereo || !foveation.enabled()) return framebuffer;
+        FoveationCentre centre = projectionCentre(eyeFov[eye]);
+        Pose gaze;
+        const bool tracked = haveEyeGaze && runtimeEyesValid && !synthetic && input.gazePose(gaze);
+        if (tracked) {
+            const Quat rotation = quatMul(quatConj(runtimeEyePose[eye].q), gaze.q);
+            centre = gazeCentre(eyeFov[eye], quatRotate(rotation, { 0, 0, -1 }));
+        }
+        if (eye == 0 && (gazeState < 0 || gazeState != int(tracked))) {
+            gazeState = int(tracked);
+            dk64vr_logpf("[vr-fov]", "centre_source=%s (sampled once at predictedDisplayTime)", tracked ? "eye-gaze" : "fixed-projection");
+        }
+        auto result = foveation.framebuffer(eye, commands, framebuffer, eyeChain[eye].width, eyeChain[eye].height, centre, frameCount);
+        foveatedEye[eye] = foveatedEye[eye] || result != framebuffer;
+        return result;
+    }
+
+    void setFoveationRate(plume::RenderCommandList *commands, bool useAttachment) override {
+        if (foveation.enabled()) static_cast<plume::VulkanCommandList *>(commands)->setShadingRateEnabled(useAttachment);
     }
 
     plume::RenderFramebuffer *hudAcquire(uint32_t hudCalls, uint64_t hudSignature, uint32_t *width, uint32_t *height) override {
@@ -963,10 +1013,13 @@ public:
             char line[256];
             if (sfvr_perf_poll(&perf, nowS, line, sizeof(line))) {
                 const double windowS = nowS - perfWindowStartS;
-                printf("%s mode=%s rate=%.1fHz eye=%ux%u game=%.1fHz rebases=%" PRIu64 " hud=%.2f/%.2fms x%u same=%u rate=%u changed=%u/%u/%u/%u/%u/%u/%u\n", line, stereoShown ? (cinemaActive ? "cinema" : "stereo") : "flat", (periodS > 0.0) ? (1.0 / periodS) : 0.0,
+                const uint64_t foveatedPasses = device->shadingRatePasses.load(std::memory_order_relaxed);
+                printf("%s mode=%s rate=%.1fHz eye=%ux%u game=%.1fHz rebases=%" PRIu64 " hud=%.2f/%.2fms x%u same=%u rate=%u changed=%u/%u/%u/%u/%u/%u/%u foveated_passes=%" PRIu64 " foveation=%s\n", line, stereoShown ? (cinemaActive ? "cinema" : "stereo") : "flat", (periodS > 0.0) ? (1.0 / periodS) : 0.0,
                     eyeChain[0].width, eyeChain[0].height, (windowS > 0.0) ? double(scheduler.arrivals - perfWindowArrivals) / windowS : 0.0, scheduler.rebases - perfWindowRebases,
                     hudPasses ? hudCpuSum / hudPasses : 0.0, hudPasses ? hudGpuSum / hudPasses : 0.0, hudPasses, hudSkipsSame, hudSkipsRate,
-                    hudPartChanges[0], hudPartChanges[1], hudPartChanges[2], hudPartChanges[3], hudPartChanges[4], hudPartChanges[5], hudPartChanges[6]);
+                    hudPartChanges[0], hudPartChanges[1], hudPartChanges[2], hudPartChanges[3], hudPartChanges[4], hudPartChanges[5], hudPartChanges[6],
+                    foveatedPasses - perfWindowFoveatedPasses, foveationName(FoveationLevel(int(setting("foveation")))));
+                perfWindowFoveatedPasses = foveatedPasses;
                 if (statFrames > 0) {
                     const double n = double(statFrames);
                     auto avg = [&](int e, int k) { return statSum[e][k] / n; };
@@ -1193,7 +1246,7 @@ private:
             dk64vr_logpf("[openxr]", "no B8G8R8A8_SRGB swapchain format: no flat panel");
         }
 
-        input.create(instance, session, haveFrameProfile);
+        input.create(instance, session, haveFrameProfile, haveEyeGaze && foveation.enabled());
         frameWorker = std::make_unique<RT64::RenderWorker>(device, "VR Frame", plume::RenderCommandListType::DIRECT);
         createUiImage();
         panelWorker = std::make_unique<RT64::RenderWorker>(device, "VR Panel", plume::RenderCommandListType::DIRECT);
@@ -1267,6 +1320,7 @@ private:
             // Nothing of ours may still run on the GPU when the images go away.
             vkDeviceWaitIdle(device->vk);
         }
+        foveation.reset();
 
         {
             std::scoped_lock lock(panelMutex);
@@ -1446,12 +1500,13 @@ private:
         XrViewState viewState = { XR_TYPE_VIEW_STATE };
         XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
         uint32_t count = 0;
-        xrLocateViews(session, &locateInfo, &viewState, 2, &count, views);
+        const XrResult viewResult = xrLocateViews(session, &locateInfo, &viewState, 2, &count, views);
         XrSpaceLocation head = { XR_TYPE_SPACE_LOCATION };
         xrLocateSpace(viewSpace, localSpace, frameState.predictedDisplayTime, &head);
         const XrViewStateFlags needed = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
         const bool viewsValid = (count == 2) && ((viewState.viewStateFlags & needed) == needed);
         const bool headValid = (head.locationFlags & (XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT)) == (XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT);
+        runtimeEyesValid = XR_SUCCEEDED(viewResult) && viewsValid && headValid;
 
         // FOV from the runtime; the Frame's measured left-eye FOV (platform.md) when it gives none.
         for (uint32_t eye = 0; eye < 2; eye++) {
@@ -1462,6 +1517,7 @@ private:
             }
 
             eyeXrFov[eye] = fov;
+            runtimeEyePose[eye] = fromXr(views[eye].pose);
             eyeFov[eye].left = std::tan(fov.angleLeft);
             eyeFov[eye].right = std::tan(fov.angleRight);
             eyeFov[eye].up = std::tan(fov.angleUp);
@@ -2317,6 +2373,15 @@ private:
     FovTangents hiddenNdcFov[2];
     bool hiddenMeshValid[2] = {};
     bool hiddenMeshLogged = false;
+    bool haveEyeGaze = false;
+    bool valveFdmDisabled = true;
+    XrFoveation foveation;
+    bool foveatedEye[2] = {};
+    bool foveationDumped[2] = {};
+    int gazeState = -1;
+    uint64_t perfWindowFoveatedPasses = 0;
+    bool runtimeEyesValid = false;
+    Pose runtimeEyePose[2];
     XrInstance instance = XR_NULL_HANDLE;
     XrSystemId systemId = XR_NULL_SYSTEM_ID;
     PFN_xrGetVulkanGraphicsRequirements2KHR getGraphicsRequirements = nullptr;

@@ -16,7 +16,7 @@ namespace dk64vr {
 class XrInput {
 public:
     // After the session exists. Logs each profile's suggest result (lesson 33) and the attach.
-    bool create(XrInstance instance, XrSession session, bool frameProfile);
+    bool create(XrInstance instance, XrSession session, bool frameProfile, bool eyeGaze = false);
     void destroy();
 
     // Syncs and samples. `focused` false (or a failed sync) gives an invalid sample: every input
@@ -25,6 +25,7 @@ public:
 
     // The dominant hand's aim pose (hand 0 = left, 1 = right), valid when tracked.
     bool aimPose(int hand, Pose &pose) const { pose = aim[hand]; return aimValid[hand]; }
+    bool gazePose(Pose &pose) const { pose = gaze; return gazeValid; }
 
     sfvr_haptic_queue haptics = {};
     // Sends the queued pulses, scaled by `strength` (the haptics setting).
@@ -41,6 +42,10 @@ private:
     XrSpace aimSpace[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
     Pose aim[2];
     bool aimValid[2] = {};
+    XrAction gazeAction = XR_NULL_HANDLE;
+    XrSpace gazeSpace = XR_NULL_HANDLE;
+    Pose gaze;
+    bool gazeValid = false;
     bool loggedState = false;
     bool syncFailedLogged = false;
     uint32_t samplesLogged = 0;

@@ -470,6 +470,29 @@ static void testSettings() {
         "resolution_scale = 0.75\n";
     dk64vr_settings_parse(&s, schema3Chosen, std::strlen(schema3Chosen));
     CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 0.75, 1e-9);
+    // New optional keys need no schema migration. A schema-4 file with a chosen
+    // scale gets off defaults for missing foveation keys and keeps that scale.
+    dk64vr_settings_t prior = {};
+    dk64vr_settings_defaults(&prior);
+    prior.file_values[dk64vr_settings_index("resolution_scale")] = 1.0;
+    size_t priorLength = 0;
+    char *priorText = dk64vr_settings_format(&prior, &priorLength);
+    std::string schema4(priorText ? priorText : "", priorText ? priorLength : 0);
+    free(priorText);
+    dk64vr_settings_free(&prior);
+    for (const char *key : { "foveation", "foveation_eye_tracked", "dump_foveation" }) {
+        const size_t line = schema4.find("\n" + std::string(key) + " = ");
+        CHECK(line != std::string::npos);
+        if (line != std::string::npos) {
+            const size_t start = line + 1;
+            schema4.erase(start, schema4.find('\n', start) - start + 1);
+        }
+    }
+    // Exactly the three absent keys are inserted; no schema/default migration.
+    CHECK(dk64vr_settings_parse(&s, schema4.data(), schema4.size()) == 3);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.0, 1e-9);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 0.0, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation_eye_tracked")], 0.0, 0.0);
     const char *chosen =
         "version = 1\n"
         "[vr]\n"
@@ -532,6 +555,9 @@ static void testFoveation() {
     CHECK(std::all_of(fallback.rates.begin(), fallback.rates.end(), [](uint8_t r) { return r == 0 || r == 5; }));
     const auto unsupported = makeShadingRateMap(100, 100, 100, 100, 16, 16, {}, FoveationLevel::High, 1);
     CHECK(std::all_of(unsupported.rates.begin(), unsupported.rates.end(), [](uint8_t r) { return r == 0; }));
+    // Low never exceeds two pixels on either axis, even when only 1x4 is offered.
+    const auto wideOnly = makeShadingRateMap(100, 100, 100, 100, 16, 16, {}, FoveationLevel::Low, (1u << 0) | (1u << 2));
+    CHECK(std::all_of(wideOnly.rates.begin(), wideOnly.rates.end(), [](uint8_t r) { return r == 0; }));
     CHECK(makeShadingRateMap(0, 100, 100, 100, 16, 16, {}, FoveationLevel::High, supported).rates.empty());
     const auto visualization = shadingRateVisualization(high);
     CHECK(visualization.size() == high.rates.size() * 4);
@@ -540,7 +566,7 @@ static void testFoveation() {
     // New settings round-trip, repair bad enum names, and keep env overrides out of the file.
     dk64vr_settings_t s = {};
     dk64vr_settings_defaults(&s);
-    const char *text = "[vr]\nfoveation = high\nfoveation_eye_tracked = true\ndump_foveation = true\n";
+    const char *text = "version = 1\n[vr]\nport_schema = 4\nresolution_scale = 0.75\nfoveation = high\nfoveation_eye_tracked = true\ndump_foveation = true\n";
     dk64vr_settings_parse(&s, text, strlen(text));
     CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 3, 0);
     size_t length = 0;
@@ -548,6 +574,9 @@ static void testFoveation() {
     dk64vr_settings_t roundTrip = {};
     dk64vr_settings_defaults(&roundTrip);
     CHECK(dk64vr_settings_parse(&roundTrip, formatted, length) == 0);
+    CHECK_NEAR(roundTrip.file_values[dk64vr_settings_index("port_schema")], 4, 0);
+    CHECK_NEAR(roundTrip.file_values[dk64vr_settings_index("resolution_scale")], 0.75, 1e-9);
+    CHECK_NEAR(roundTrip.file_values[dk64vr_settings_index("dump_foveation")], 1, 0);
     CHECK_NEAR(roundTrip.file_values[dk64vr_settings_index("foveation_eye_tracked")], 1, 0);
     CHECK(dk64vr_settings_apply_env(&s, [](const char *name) -> const char * {
         return strcmp(name, "DK64_VR_FOVEATION") == 0 ? "low" : nullptr;

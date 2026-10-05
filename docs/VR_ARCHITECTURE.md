@@ -141,6 +141,9 @@ nearest offered rate), `resolution_scale` 1.25 (2160² from the recommended 1728
 | `diag_exit_seconds` | 0 s | Quit cleanly this long after the session starts |
 | `dump_count`, `dump_interval`, `diag_yaw_step` | 1, 120, 0 | `dump_frame` repeats: e.g. 3, 300, 90 dumps yaw 0, 90 and 180 in one run |
 | `dump_panel_frame` | 0 | Dump the panel every Nth present (up to 40) |
+| `foveation` | `off` | App-owned KHR shading-rate attachment on gameplay eye raster passes: `off`, `low`, `medium`, `high` |
+| `foveation_eye_tracked` | false | Move the sharp region using valid `XR_EXT_eye_gaze_interaction` poses; otherwise use the asymmetric projection centre |
+| `dump_foveation` | false | Write `vr-fov-eye{0,1}-N.png`, a visualisation of the submitted rate-map bytes, once and with each eye dump |
 | `port_schema` | 4 | Migration marker: a file below 4 that still holds an old default takes the new one once (world_scale 25, resolution_scale 1.25 then 1.0, refresh_rate 120, hud_distance 2, snap_blink 0.15) |
 | `right_stick_x` | `turn` | `turn`: comfort turn (`turn_mode`, `snap_angle`, `smooth_turn_speed`); `camera`: the game's own C-left/C-right camera swing |
 | `move_from_view` | true | Left stick relative to where you look (`move_relative`: head, left or right hand) instead of the game camera |
@@ -172,7 +175,8 @@ refresh rates, `predictedDisplayPeriod`, swapchain formats and sizes, eye distan
 classification and game fov/near/far. `[vr-stall]` when no frame passes a checkpoint for 3 s.
 
 Steam launches take diagnostics from a one-shot `vr-diag` file in the app folder, read and deleted by
-`LAUNCH-STEAM-FRAME.sh`: lines `DK64_VR_<KEY>=<value>` or `RT64_VR_<NAME>=<value>`, and
+`LAUNCH-STEAM-FRAME.sh`: lines `DK64_VR_<KEY>=<value>` or `RT64_VR_<NAME>=<value>`,
+`FDM_DEBUG=<value>`, `DISABLE_VULKAN_FDM_INJECTION_LAYER=<value>`, and
 `ARGS=--game dk64` to skip the launcher. The log says `[vr] diag: ...` or `[vr] diag: no vr-diag file`.
 `tools/steam_frame/unattended.sh <seconds> <out> KEY=VALUE...` arms that file, launches the title
 through `~/.steam/steam.pipe`, waits, stops it if needed and fetches the log and dumps (book the Frame
@@ -265,6 +269,71 @@ Two routes are viable:
 The implementation remains off by default until a device A/B measures it. `foveation` is
 `off/low/medium/high`; `foveation_eye_tracked` is false by default. Pure map generation includes
 RT64 target padding, the asymmetric projection centre and tile coverage of the sharp disc.
+Schema 4 and its resolution default 1.25 (2160²) stay unchanged: missing optional foveation keys
+take their off defaults without migrating or resetting user-selected resolutions.
+
+Implementation: `src/vr/xr/xr_foveation.*` owns feature negotiation, per-eye R8_UINT images, rate
+uploads and diagnostic CPU mirrors. `VrHost::foveatedFramebuffer` selects a cached companion only
+while recording the main eye's raster framebuffer; read-only-depth companions carry the same rate
+image. Plume converts that optional pass to render-pass-2, preserving the original colour/depth
+load/store descriptions. The same rate-aware factory creates its deferred-clear variants, carrying
+the R8_UINT attachment and subpass pNext into `getClearRenderPass`; read-only-depth companions also
+keep the performance work's LOAD/STORE_NONE choice. Ordinary passes retain their original
+construction. Pipelines enable a dynamic KHR combiner only when the feature was enabled at device creation: 1x1 pipeline rate,
+KEEP primitive rate, REPLACE attachment rate. Unattached passes use KEEP/KEEP, hence 1x1. Shared
+ownership keeps each rate image alive until its last companion framebuffer is destroyed.
+The hidden-area mesh is drawn at full rate into the same colour/depth targets before scene raster
+foveation. Both optimisations apply to the eye; mask, eye-output draw and HUD solve passes remain
+unfoveated. The deferred final-eye submission is finished by `threadVrFinishSubmission` before
+the next scene records or uploads a map, preserving upload-buffer and image reuse safety.
+
+The Vulkan device contract forbids FDM and KHR attachment-rate features together. VR start-up
+defaults `DISABLE_VULKAN_FDM_INJECTION_LAYER` to 1 before layer enumeration, including `foveation=off`
+so the baseline is explicit. A one-shot value 0 unsets the variable before loading and selects a
+Valve-only diagnostic run; the app refuses its KHR backend (`reason=Valve-layer-selected`). This
+lets the coordinator compare the previous layer-allowed baseline without enabling conflicting
+features. Loaded/injected Valve state cannot be introspected by the app: it logs
+`Valve_injected=unknown-see-FDM_DEBUG` when allowed. Confirm injection from layer diagnostics,
+not from the presence of an XR extension or a matching target size.
+
+Hazards handled:
+
+* Colour/depth images are ordinary, non-subsampled allocations. RT64's authoritative left-eye
+  target, framebuffer copies/readbacks/effects, colour/depth sampling for blending/decals, and the
+  draw into the sRGB swapchain (and optional transfer-copy fallback) retain their image layouts and
+  samplers. There is no compressed pixel coordinate space and no new gamma conversion. Eye shading is coarser only in the selected
+  regions; copied peripheral shading naturally carries that approximation into subsequent effects.
+* HUD black/white renders, HUD solve, panel, cinema, pointer, probe and offscreen targets never
+  select a rate companion. HUD/crosshair/subtitle text remains full density. Even in a main eye
+  pass, low-res 2D UV snapping, no-near-clip geometry, decals, combiner noise and alpha dither use a
+  KEEP/KEEP combiner; post-blend noise also stays 1x1. This is dynamic state, without new decal/pass
+  splits or shader edits, to keep the parallel RT64/plume work easy to merge.
+* `RasterPS` still receives full-framebuffer `SV_Position`/FragCoord values: no density-map UV
+  rescaling is applied. Native texture UVs/3-point filtering and depth values retain their
+  coordinate meaning. Pixel-addressed depth comparisons and noise use the full-rate exceptions
+  above. Specialized VR shaders retain the performance work's vertex far-clip distance; fallback
+  shaders retain their fragment depth clip. Alpha thresholds and fallback clipping are evaluated
+  at the coarse fragment's representative sample, so clip contours, texture LOD transitions and
+  thin alpha geometry need visual A/B acceptance; pixel-exact equivalence there is not claimed.
+* The map's white disc uses distance to the nearest point of each tile, protecting every tile
+  that touches the sharp region. Low: radius 0.38 of the shorter eye dimension, then up to 2x2;
+  medium: 0.28, 2x2 until 0.58, then up to 4x4; high: 0.20, 2x2 until 0.42, then up to 4x4.
+  Device-supported single-sample rates cap these requests. The map covers the allocated target,
+  including padding, while the centre is measured in the visible eye rectangle.
+* Valid tracked gaze is sampled once at predicted display time through the existing input sync.
+  It is transformed into each runtime eye's coordinates (before recenter/diagnostic rotations).
+  Inactive, invalid, synthetic or unsupported gaze, or invalid runtime eye poses, immediately uses
+  the projection centre. The EXT action supplies one gaze ray, not independent eye vergence. KHR
+  permits its map copy before rasterisation in the current eye command list; no extra synchronous
+  upload submission is needed.
+
+Diagnostics: `[vr-fov]` once for capabilities/backend/profile/layer decision and once per new eye
+target extent for map sizes and selected/excluded passes; gaze source on changes; map dump metadata
+when requested. `[vr-perf] foveated_passes=N` counts actual attached render-pass starts in each
+window; it is not an eye count or a GPU invocation measurement. `dump_foveation` writes the actual
+CPU upload bytes as PNG (white 1x1, green up to 2x2, orange coarser); off/cinema produces an
+unattached white reference. The app cannot dump Valve's map. [Device A/B plan](FOVEATION_TEST.md)
+records exact one-shot files, three repeats, interpretation and the separate gaze/worn gate.
 
 Primary contracts: [FB foveation](https://registry.khronos.org/OpenXR/specs/1.1/html/xrspec.html#XR_FB_foveation),
 [EXT density maps](https://docs.vulkan.org/samples/latest/samples/extensions/fragment_density_map/README.html),
@@ -346,6 +415,7 @@ logs and dumps (and composites rebuilt from them); it never pressed a button.
 | Feature | State |
 | --- | --- |
 | Linux ARM64 flat build and package | builds (flat and VR); flat not run on the device in this round |
+| App-owned eye foveation | rebased onto performance work; 1,643 host checks and VR/flat ARM64 builds pass; not run on device |
 | OpenXR host, plume Vulkan binding | verified unattended (probe colours per eye, session lifecycle, clean exit) |
 | Frame driver, per-eye replay, eye camera | verified unattended (stereo eye dumps in DK Isles; 70-72 fps at 1728²) |
 | Controller bindings: Frame first, Index and Touch | host-tested (every path against each profile's components, unique names); all three profiles accepted on the device; no button press seen yet |

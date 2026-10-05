@@ -6,7 +6,8 @@
 #   tools/steam_frame/unattended.sh <seconds> <out-dir> [KEY=VALUE ...]
 #
 # KEY=VALUE become DK64_VR_<KEY>=<VALUE> lines (e.g. force_render=1 dump_frame=600); RT64_VR_*,
-# TU_*, FD_*, MESA_* and VK_* pass through unchanged (e.g. TU_DEBUG=perf); ARGS=... is
+# TU_*, FD_*, MESA_*, VK_*, FDM_DEBUG and DISABLE_VULKAN_FDM_INJECTION_LAYER pass through
+# unchanged (e.g. TU_DEBUG=perf); ARGS=... is
 # passed through (default ARGS=--game dk64, which skips the launcher). Book the Frame first
 # (frame-lock.sh claim). The run stops on its own only with diag_exit_seconds; otherwise the
 # script stops it after <seconds>.
@@ -33,7 +34,7 @@ have_args=0
 for kv in "$@"; do
 	case "$kv" in
 		ARGS=*) diag+="$kv"$'\n'; have_args=1 ;;
-		RT64_VR_*=* | TU_*=* | FD_*=* | MESA_*=* | VK_*=*) diag+="$kv"$'\n' ;;
+		RT64_VR_*=* | TU_*=* | FD_*=* | MESA_*=* | VK_*=* | FDM_DEBUG=* | DISABLE_VULKAN_FDM_INJECTION_LAYER=*) diag+="$kv"$'\n' ;;
 		*=*) k="${kv%%=*}"; diag+="DK64_VR_$(printf '%s' "$k" | tr '[:lower:]' '[:upper:]')=${kv#*=}"$'\n' ;;
 	esac
 done
