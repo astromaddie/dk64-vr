@@ -107,10 +107,15 @@ struct InputSample {
 enum class RightStickX { Turn = 0, GameCamera = 1 };
 enum class TurnMode { Snap = 0, Smooth = 1, Off = 2 };  // the standard's turn_mode order
 
+// Smooth turning (turn_mode smooth): the orbit's rate in degrees a second, positive = right,
+// from right-stick X: the standard's 20% deadzone, then the rest of the travel to the power 1.5
+// (fine control near the centre), up to smooth_turn_speed at full deflection.
+float smoothTurnRate(float stickX, float speedDps);
+
 struct InputConfig {
     RightStickX rightStickX = RightStickX::Turn;
     TurnMode turnMode = TurnMode::Snap;
-    float snapAngleDeg = 30.0f;
+    float snapAngleDeg = 45.0f;
     float smoothSpeedDps = 120.0f;
     bool moveFromView = true;  // left stick relative to where the wearer looks (head or hand)
 };

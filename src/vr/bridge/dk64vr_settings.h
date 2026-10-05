@@ -21,6 +21,9 @@ extern "C" {
 
 #define DK64VR_SETTINGS_MAX_KEYS 96
 
+// resolution_scale = "auto": an absolute eye size (dk64vr::eyeSize), stored as this value.
+#define DK64VR_RESOLUTION_AUTO 0.0
+
 typedef struct {
 	double values[DK64VR_SETTINGS_MAX_KEYS]; // effective: file value, then env override
 	double file_values[DK64VR_SETTINGS_MAX_KEYS]; // what the file holds (and save() writes)

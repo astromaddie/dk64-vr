@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "dk64vr_camsmooth.h"
 #include "dk64vr_input.h"
 #include "dk64vr_foveation.h"
 #include "dk64vr_math.h"
@@ -366,6 +367,10 @@ static void captureLog(const char *line) {
     logLines.emplace_back(line);
 }
 
+static const char *autoEnv(const char *name) {
+    return (std::strcmp(name, "DK64_VR_RESOLUTION_SCALE") == 0) ? "auto" : nullptr;
+}
+
 static const char *fakeEnv(const char *name) {
     if (std::strcmp(name, "DK64_VR_WORLD_SCALE") == 0) {
         return "40";
@@ -384,16 +389,18 @@ static void testSettings() {
     std::memset(&s, 0, sizeof(s));
     dk64vr_settings_defaults(&s);
     CHECK_NEAR(dk64vr_settings_get(&s, "refresh_rate"), 72.0, 0.0);
-    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), 1.25, 1e-9);
+    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), DK64VR_RESOLUTION_AUTO, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "camera_smoothing"), 2.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "port_schema"), 5.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 15.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.5, 1e-9);
     CHECK_NEAR(dk64vr_settings_get(&s, "turn_mode"), 0.0, 0.0);
-    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 30.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 45.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "right_stick_x"), 0.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "cutscenes"), 0.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "level_pitch"), 1.0, 0.0);
-    CHECK_NEAR(dk64vr_settings_get(&s, "foveation"), 0.0, 0.0);
-    CHECK_NEAR(dk64vr_settings_get(&s, "foveation_eye_tracked"), 0.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "foveation"), 3.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "foveation_eye_tracked"), 1.0, 0.0);
 
     // A file with a clamped value, a bad value, an unknown key and a comment.
     const char *text =
@@ -409,7 +416,7 @@ static void testSettings() {
     CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 100.0, 0.0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("timing")], 0.0, 0.0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("dump_frame")], 600.0, 0.0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.25, 1e-9);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], DK64VR_RESOLUTION_AUTO, 0.0);
 
     // Round trip: what format() writes parses back to the same values with nothing to repair.
     size_t len = 0;
@@ -417,6 +424,8 @@ static void testSettings() {
     CHECK(out != nullptr);
     if (out != nullptr) {
         CHECK(std::strstr(out, "my_own_key = 3") != nullptr);
+        CHECK(std::strstr(out, "resolution_scale = \"auto\"") != nullptr);
+        CHECK(std::strstr(out, "camera_smoothing = \"medium\"") != nullptr);
         CHECK(std::strstr(out, "# mine") != nullptr);
         dk64vr_settings_t again;
         std::memset(&again, 0, sizeof(again));
@@ -442,8 +451,8 @@ static void testSettings() {
     CHECK(dk64vr_settings_count() <= DK64VR_SETTINGS_MAX_KEYS);
 
     // Schema migrations (lesson 79): old defaults in an older file move to the new ones once and
-    // values the user chose stay. resolution_scale went 1.25 -> 1.0 (schema 2) and back to 1.25
-    // (schema 4).
+    // values the user chose stay. resolution_scale went 1.25 -> 1.0 (schema 2), back to 1.25
+    // (schema 4) and to auto (schema 5).
     const char *old =
         "version = 1\n"
         "[vr]\n"
@@ -452,17 +461,49 @@ static void testSettings() {
         "refresh_rate = 90\n";
     CHECK(dk64vr_settings_parse(&s, old, std::strlen(old)) > 0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 15.0, 0.0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.25, 1e-9);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], DK64VR_RESOLUTION_AUTO, 0.0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("refresh_rate")], 90.0, 0.0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("port_schema")], 4.0, 0.0);
-    // A schema-3 file still at the old default 1.0 moves to 1.25; one the user set to 0.75 stays.
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("port_schema")], 5.0, 0.0);
+    // A schema-3 file still at the old default 1.0 moves on to auto; one the user set to 0.75 stays.
     const char *schema3 =
         "version = 1\n"
         "[vr]\n"
         "port_schema = 3\n"
         "resolution_scale = 1.0\n";
     CHECK(dk64vr_settings_parse(&s, schema3, std::strlen(schema3)) > 0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.25, 1e-9);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], DK64VR_RESOLUTION_AUTO, 0.0);
+    // The Frame's vr.toml: schema 4 at the old default 1.25 moves to auto; 1.0 chosen at schema 4
+    // stays; auto parses by name (any case) and from the environment.
+    const char *schema4Old =
+        "version = 1\n"
+        "[vr]\n"
+        "port_schema = 4\n"
+        "resolution_scale = 1.25\n";
+    CHECK(dk64vr_settings_parse(&s, schema4Old, std::strlen(schema4Old)) > 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], DK64VR_RESOLUTION_AUTO, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("port_schema")], 5.0, 0.0);
+    const char *schema4Chosen =
+        "version = 1\n"
+        "[vr]\n"
+        "port_schema = 4\n"
+        "resolution_scale = 1.0\n";
+    dk64vr_settings_parse(&s, schema4Chosen, std::strlen(schema4Chosen));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.0, 1e-9);
+    const char *autoNamed =
+        "version = 1\n"
+        "[vr]\n"
+        "port_schema = 5\n"
+        "resolution_scale = \"Auto\"\n"
+        "camera_smoothing = high\n";
+    dk64vr_settings_parse(&s, autoNamed, std::strlen(autoNamed));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], DK64VR_RESOLUTION_AUTO, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_smoothing")], 3.0, 0.0);
+    dk64vr_settings_set(&s, "resolution_scale", 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), DK64VR_RESOLUTION_AUTO, 0.0);
+    dk64vr_settings_set(&s, "resolution_scale", 9.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), 1.5, 1e-6);
+    CHECK(dk64vr_settings_apply_env(&s, autoEnv) == 1);
+    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), DK64VR_RESOLUTION_AUTO, 0.0);
     const char *schema3Chosen =
         "version = 1\n"
         "[vr]\n"
@@ -471,7 +512,7 @@ static void testSettings() {
     dk64vr_settings_parse(&s, schema3Chosen, std::strlen(schema3Chosen));
     CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 0.75, 1e-9);
     // New optional keys need no schema migration. A schema-4 file with a chosen
-    // scale gets off defaults for missing foveation keys and keeps that scale.
+    // scale gets the defaults (high, eye-tracked) for missing foveation keys and keeps that scale.
     dk64vr_settings_t prior = {};
     dk64vr_settings_defaults(&prior);
     prior.file_values[dk64vr_settings_index("resolution_scale")] = 1.0;
@@ -491,8 +532,42 @@ static void testSettings() {
     // Exactly the three absent keys are inserted; no schema/default migration.
     CHECK(dk64vr_settings_parse(&s, schema4.data(), schema4.size()) == 3);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("resolution_scale")], 1.0, 1e-9);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 3.0, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation_eye_tracked")], 1.0, 0.0);
+    // Schema 5: a schema-4 file at the old foveation defaults (off, false) takes high and
+    // eye-tracked; a level the user chose stays.
+    const char *fov4 =
+        "version = 1\n"
+        "[vr]\n"
+        "port_schema = 4\n"
+        "foveation = \"off\"\n"
+        "foveation_eye_tracked = false\n";
+    dk64vr_settings_parse(&s, fov4, std::strlen(fov4));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 3.0, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation_eye_tracked")], 1.0, 0.0);
+    const char *fov4Chosen =
+        "version = 1\n"
+        "[vr]\n"
+        "port_schema = 4\n"
+        "foveation = \"low\"\n"
+        "foveation_eye_tracked = true\n";
+    dk64vr_settings_parse(&s, fov4Chosen, std::strlen(fov4Chosen));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 1.0, 0.0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation_eye_tracked")], 1.0, 0.0);
+    // snap_angle: the old default 30 moves to 45 at schema 5; 60 chosen stays.
+    const char *snap4 = "version = 1\n[vr]\nport_schema = 4\nsnap_angle = 30\n";
+    dk64vr_settings_parse(&s, snap4, std::strlen(snap4));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("snap_angle")], 45.0, 0.0);
+    const char *snap4Chosen = "version = 1\n[vr]\nport_schema = 4\nsnap_angle = 60\n";
+    dk64vr_settings_parse(&s, snap4Chosen, std::strlen(snap4Chosen));
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("snap_angle")], 60.0, 0.0);
+    const char *fov5Off =
+        "version = 1\n"
+        "[vr]\n"
+        "port_schema = 5\n"
+        "foveation = \"off\"\n";
+    dk64vr_settings_parse(&s, fov5Off, std::strlen(fov5Off));
     CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 0.0, 0.0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation_eye_tracked")], 0.0, 0.0);
     const char *chosen =
         "version = 1\n"
         "[vr]\n"
@@ -574,7 +649,7 @@ static void testFoveation() {
     dk64vr_settings_t roundTrip = {};
     dk64vr_settings_defaults(&roundTrip);
     CHECK(dk64vr_settings_parse(&roundTrip, formatted, length) == 0);
-    CHECK_NEAR(roundTrip.file_values[dk64vr_settings_index("port_schema")], 4, 0);
+    CHECK_NEAR(roundTrip.file_values[dk64vr_settings_index("port_schema")], 5, 0);  // migrated; 0.75 kept
     CHECK_NEAR(roundTrip.file_values[dk64vr_settings_index("resolution_scale")], 0.75, 1e-9);
     CHECK_NEAR(roundTrip.file_values[dk64vr_settings_index("dump_foveation")], 1, 0);
     CHECK_NEAR(roundTrip.file_values[dk64vr_settings_index("foveation_eye_tracked")], 1, 0);
@@ -587,8 +662,8 @@ static void testFoveation() {
     dk64vr_settings_free(&roundTrip);
     const char *bad = "[vr]\nfoveation = extreme\nfoveation_eye_tracked = maybe\n";
     dk64vr_settings_parse(&s, bad, strlen(bad));
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 0, 0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation_eye_tracked")], 0, 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation")], 3, 0);  // bad values take the defaults
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("foveation_eye_tracked")], 1, 0);
     dk64vr_settings_free(&s);
 }
 
@@ -791,12 +866,12 @@ static void testTurnAndView() {
     double t = 1.0;
     // Snap: one step per flick, re-armed under 0.3.
     s.rStick[0] = 0.9f;
-    CHECK_NEAR(m.update(s, config, context, t += 0.014, 0.014f).turnDeg, 30.0, 1e-5);
+    CHECK_NEAR(m.update(s, config, context, t += 0.014, 0.014f).turnDeg, 45.0, 1e-5);
     CHECK_NEAR(m.update(s, config, context, t += 0.014, 0.014f).turnDeg, 0.0, 1e-5);
     s.rStick[0] = 0.1f;
     m.update(s, config, context, t += 0.014, 0.014f);
     s.rStick[0] = -0.9f;
-    CHECK_NEAR(m.update(s, config, context, t += 0.014, 0.014f).turnDeg, -30.0, 1e-5);
+    CHECK_NEAR(m.update(s, config, context, t += 0.014, 0.014f).turnDeg, -45.0, 1e-5);
     // The game's own camera instead: C-left / C-right.
     config.rightStickX = RightStickX::GameCamera;
     InputResult r = m.update(s, config, context, t += 0.014, 0.014f);
@@ -1021,6 +1096,338 @@ static void testCinema() {
     CHECK(matNear(flat.view, view, 1e-6f));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Eye size and camera smoothing
+
+static void testEyeSize() {
+    // auto: the recommendation scaled up to 2160, or used as it is when it already reaches it.
+    EyeSize e = eyeSize(1728, 1728, 4096, 4096, 0.0);
+    CHECK(e.width == 2160 && e.height == 2160);
+    CHECK_NEAR(e.scale, 1.25, 1e-9);
+    e = eyeSize(2160, 2160, 4096, 4096, 0.0);
+    CHECK(e.width == 2160 && e.height == 2160);
+    CHECK_NEAR(e.scale, 1.0, 0.0);
+    e = eyeSize(2592, 2592, 4096, 4096, 0.0);
+    CHECK(e.width == 2592 && e.height == 2592);
+    e = eyeSize(1728, 1728, 2000, 2000, 0.0);
+    CHECK(e.width == 2000 && e.height == 2000);
+    e = eyeSize(1600, 1700, 4096, 4096, 0.0);  // the longer side reaches 2160, both even
+    CHECK(e.height == 2160 && e.width == 2032);
+    // A number multiplies the recommendation, as before (the 2700 that halved the frame rate).
+    e = eyeSize(2160, 2160, 4096, 4096, 1.25);
+    CHECK(e.width == 2700 && e.height == 2700);
+    e = eyeSize(1728, 1728, 4096, 4096, 0.75);
+    CHECK(e.width == 1296 && e.height == 1296);
+}
+
+static Pose camAt(float x, float y, float z, float yawDeg, float pitchDeg = 0.0f) {
+    const float yaw = yawDeg * 3.14159265f / 180.0f, pitch = pitchDeg * 3.14159265f / 180.0f;
+    Pose p;
+    p.q = quatMul(quatFromYaw(yaw), Quat { std::sin(0.5f * pitch), 0.0f, 0.0f, std::cos(0.5f * pitch) });
+    p.p = { x, y, z };
+    return p;
+}
+
+static bool poseNear(const Pose &a, const Pose &b, float posEps, float angEps) {
+    const float dp = std::sqrt((a.p.x - b.p.x) * (a.p.x - b.p.x) + (a.p.y - b.p.y) * (a.p.y - b.p.y) + (a.p.z - b.p.z) * (a.p.z - b.p.z));
+    const float da = quatAngle(a.q, b.q);
+    if (!(dp <= posEps) || !(da <= angEps)) {
+        std::printf("  pose differs by %.6g units, %.6g rad\n", dp, da);
+        return false;
+    }
+
+    return true;
+}
+
+static void testCameraPoseFromView() {
+    const Mat4 view = guLookAt({ 100.0f, 50.0f, -30.0f }, { 160.0f, 40.0f, 20.0f }, { 0.0f, 1.0f, 0.0f });
+    const Pose cam = cameraPoseFromView(view);
+    CHECK(matNear(viewFromCameraPose(cam), view, 2e-4f));
+    CHECK_NEAR(cameraYaw(cam), viewHeading(view), 1e-5);
+    const Vec3 at = normalize({ 60.0f, -10.0f, 50.0f });
+    CHECK_NEAR(cameraPitch(cam), std::asin(at.y), 1e-5);
+    // Exp and log are inverse; slerp takes the short way round.
+    const Vec3 v = { 0.3f, -0.8f, 0.2f };
+    const Vec3 back = quatLog(quatExp(v));
+    CHECK_NEAR(back.x, v.x, 1e-5);
+    CHECK_NEAR(back.y, v.y, 1e-5);
+    CHECK_NEAR(back.z, v.z, 1e-5);
+    const Quat a = quatFromYaw(3.0f), b = quatFromYaw(-3.0f);  // 0.28 rad apart across +-pi
+    CHECK_NEAR(quatAngle(quatSlerp(a, b, 0.5f), quatFromYaw(3.14159265f)), 0.0, 1e-4);
+}
+
+static Mat4 V(const Pose &camera) {
+    return viewFromCameraPose(camera);
+}
+
+static Pose C(const Mat4 &view) {
+    return cameraPoseFromView(view);
+}
+
+static void testCameraSmoothingLatency() {
+    // Constant velocity: the B-spline is the linear path half a game frame later, exactly.
+    // Moving straight ahead without turning, and turning on the spot.
+    CameraSmoother moving, turning;
+    for (int i = 0; i < 3; i++) {
+        moving.addTick(V(camAt(10.0f * float(i), 2.0f, -5.0f, 30.0f)));
+        turning.addTick(V(camAt(0.0f, 0.0f, 0.0f, 3.0f * float(i), 1.0f * float(i))));
+    }
+
+    for (float w : { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f }) {
+        CHECK_NEAR(C(moving.spline(w)).p.x, 10.0f + 10.0f * (w - 0.5f), 1e-3);
+        CHECK_NEAR(cameraYaw(C(turning.spline(w))) * 180.0f / 3.14159265f, 3.0f + 3.0f * (w - 0.5f), 1e-3);
+        CHECK_NEAR(cameraPitch(C(turning.spline(w))) * 180.0f / 3.14159265f, 1.0f + 1.0f * (w - 0.5f), 1e-3);
+        CHECK(matNear(moving.sample(w, 1.0f / 90.0f, CameraSmoothing::Low), moving.spline(w), 1e-4f));
+        CHECK(matNear(moving.sample(w, 1.0f / 90.0f, CameraSmoothing::Off), moving.linear(w), 1e-4f));
+    }
+
+    // Off is RT64's own path: the view's rotation slerped and its translation lerped, so the host's
+    // correction inverse(linear) * sample is the identity.
+    const Mat4 a = V(camAt(0, 0, 0, 0)), b = V(camAt(30, 0, 10, 40));
+    CameraSmoother s;
+    s.addTick(a);
+    s.addTick(b);
+    const Mat4 mid = s.linear(0.5f);
+    for (int r = 0; r < 3; r++) {
+        CHECK_NEAR(mid.m[3][r], 0.5f * (a.m[3][r] + b.m[3][r]), 1e-3);
+    }
+
+    CHECK(matNear(mul(rigidInverse(s.linear(0.3f)), s.sample(0.3f, 0.01f, CameraSmoothing::Off)), Mat4(), 1e-5f));
+}
+
+static void testCameraSmoothingContinuity() {
+    // Velocity steps at every game frame (DK64's 30 Hz camera): the B-spline is continuous in
+    // position and velocity across game frames, where the linear path's velocity jumps.
+    CameraSmoother s;
+    const float xs[] = { 0, 2, 10, 11, 25, 25, 26, 40, 41, 41 };
+    const float yaws[] = { 0, 1, 6, 6, 14, 20, 21, 21, 30, 31 };
+    s.addTick(V(camAt(xs[0], 0, 0, yaws[0])));
+    float worstJump = 0.0f, worstJumpVel = 0.0f, worstLinearVelJump = 0.0f;
+    const float h = 1e-2f;
+    auto px = [](const Mat4 &v) { return C(v).p.x; };
+    for (int i = 1; i < 10; i++) {
+        const Pose endPrev = C(s.spline(1.0f));
+        const float velPrev = (px(s.spline(1.0f)) - px(s.spline(1.0f - h))) / h;
+        const float linVelPrev = (px(s.linear(1.0f)) - px(s.linear(1.0f - h))) / h;
+        s.addTick(V(camAt(xs[i], 0, 0, yaws[i])));
+        if (i < 2) {
+            continue;  // the history is still filling
+        }
+
+        const Pose startNext = C(s.spline(0.0f));
+        const float velNext = (px(s.spline(h)) - px(s.spline(0.0f))) / h;
+        const float linVelNext = (px(s.linear(h)) - px(s.linear(0.0f))) / h;
+        worstJump = std::max(worstJump, std::fabs(endPrev.p.x - startNext.p.x) + quatAngle(endPrev.q, startNext.q));
+        worstJumpVel = std::max(worstJumpVel, std::fabs(velPrev - velNext));
+        worstLinearVelJump = std::max(worstLinearVelJump, std::fabs(linVelPrev - linVelNext));
+    }
+
+    CHECK(worstJump < 1e-3f);
+    CHECK(worstJumpVel < 0.6f);          // finite differences over h; the steps are 1-14 units
+    CHECK(worstLinearVelJump > 5.0f);    // the linear path does jump
+}
+
+static void testCameraSmoothingFollower() {
+    // A steady turn at 90 deg/s, 30 Hz game frames, 90 Hz display: the follower settles to a
+    // lag of about rate x smoothing time behind the B-spline and never overshoots it.
+    for (CameraSmoothing level : { CameraSmoothing::Medium, CameraSmoothing::High }) {
+        CameraSmoother s;
+        const float rate = 90.0f;  // deg/s
+        const double tick = 1.0 / 30.0, period = 1.0 / 90.0;
+        int ticks = 0;
+        float lag = 0.0f, worstOvershoot = 0.0f;
+        for (int f = 0; f < 180; f++) {
+            const double t = f * period;
+            while (ticks * tick <= t + 1e-9) {
+                s.addTick(V(camAt(0, 0, 0, rate * float(ticks * tick))));
+                ticks++;
+            }
+
+            const float w = float((t - (ticks - 1) * tick) / tick);
+            const Pose out = C(s.sample(w, float(period), level));
+            const Pose sp = C(s.spline(w));
+            lag = wrapAngle(cameraYaw(sp) - cameraYaw(out)) * 180.0f / 3.14159265f;
+            worstOvershoot = std::min(worstOvershoot, lag);
+        }
+
+        CHECK_NEAR(lag, rate * cameraFollowTime(level), 0.12 * rate * cameraFollowTime(level));
+        CHECK(worstOvershoot > -0.05f);
+    }
+
+    // Starting and stopping a swing: the follower's angular velocity changes gradually (no step
+    // larger than a fraction of the B-spline's), and the camera's position is the B-spline's.
+    CameraSmoother s;
+    float prevYaw = 0.0f, prevStep = 0.0f, worstChange = 0.0f, worstSplineChange = 0.0f, prevSplineYaw = 0.0f, prevSplineStep = 0.0f;
+    float worstPos = 0.0f;
+    int ticks = 0;
+    for (int f = 0; f < 240; f++) {
+        const double t = f / 90.0;
+        while (ticks / 30.0 <= t + 1e-9) {
+            const double tt = ticks / 30.0;
+            const float yaw = (tt < 0.5) ? 0.0f : ((tt < 0.8) ? float((tt - 0.5) * 150.0) : 45.0f);  // a 45 deg swing in 0.3 s
+            s.addTick(V(camAt(100.0f + 3.0f * float(ticks), 20.0f, 50.0f, yaw)));
+            ticks++;
+        }
+
+        const float w = float((t - (ticks - 1) / 30.0) * 30.0);
+        const Pose out = C(s.sample(w, 1.0f / 90.0f, CameraSmoothing::Medium));
+        const Pose sp = C(s.spline(w));
+        const float yaw = cameraYaw(out);
+        const float splineYaw = cameraYaw(sp);
+        worstPos = std::max(worstPos, std::fabs(out.p.x - sp.p.x) + std::fabs(out.p.y - sp.p.y) + std::fabs(out.p.z - sp.p.z));
+        if (f > 1) {
+            worstChange = std::max(worstChange, std::fabs(wrapAngle(yaw - prevYaw) - prevStep));
+            worstSplineChange = std::max(worstSplineChange, std::fabs(wrapAngle(splineYaw - prevSplineYaw) - prevSplineStep));
+        }
+
+        prevStep = wrapAngle(yaw - prevYaw);
+        prevSplineStep = wrapAngle(splineYaw - prevSplineYaw);
+        prevYaw = yaw;
+        prevSplineYaw = splineYaw;
+    }
+
+    CHECK(worstChange < 0.6f * worstSplineChange);
+    CHECK(worstPos < 0.05f);
+    CHECK_NEAR(prevYaw * 180.0f / 3.14159265f, 45.0, 0.05);  // arrives
+}
+
+static void testCameraSmoothingCuts() {
+    for (CameraSmoothing level : { CameraSmoothing::Low, CameraSmoothing::Medium, CameraSmoothing::High }) {
+        CameraSmoother s;
+        for (int i = 0; i < 10; i++) {
+            s.addTick(V(camAt(5.0f * float(i), 0, 0, 2.0f * float(i))));
+            s.sample(0.5f, 1.0f / 90.0f, level);
+        }
+
+        // A teleport: the new camera at once, at every weight, with no swoop afterwards.
+        const Pose far = camAt(1000.0f, 50.0f, -400.0f, 120.0f);
+        CHECK(s.addTick(V(far)));
+        CHECK(s.cuts() == 1);
+        CHECK(poseNear(C(s.sample(0.0f, 1.0f / 90.0f, level)), far, 2e-3f, 1e-4f));
+        CHECK(poseNear(C(s.sample(1.0f, 1.0f / 90.0f, level)), far, 2e-3f, 1e-4f));
+        // A camera cut that only turns (a cutscene angle): also a cut.
+        const Pose turned = camAt(1000.0f, 50.0f, -400.0f, 200.0f);
+        CHECK(s.addTick(V(turned)));
+        CHECK(poseNear(C(s.sample(0.3f, 1.0f / 90.0f, level)), turned, 2e-3f, 1e-4f));
+        // The host's own reasons (a scene change).
+        const Pose same = camAt(1001.0f, 50.0f, -400.0f, 200.0f);
+        CHECK(s.addTick(V(same), true));
+        CHECK(poseNear(C(s.sample(0.7f, 1.0f / 90.0f, level)), same, 2e-3f, 1e-4f));
+        CHECK(s.cuts() == 3);
+        // A normal step is not a cut.
+        CHECK(!s.addTick(V(camAt(1010.0f, 50.0f, -400.0f, 210.0f))));
+    }
+}
+
+static void testCameraSmoothingWrap() {
+    // Headings across +-180 degrees: every displayed step is small and in the same direction.
+    for (CameraSmoothing level : { CameraSmoothing::Off, CameraSmoothing::Low, CameraSmoothing::High }) {
+        CameraSmoother s;
+        float prev = 0.0f, worst = 0.0f, least = 1e9f;
+        int ticks = 0;
+        for (int f = 0; f < 90; f++) {
+            const double t = f / 90.0;
+            while (ticks / 30.0 <= t + 1e-9) {
+                s.addTick(V(camAt(0, 0, 0, 160.0f + 2.0f * float(ticks))));  // 160 .. 220 = -140
+                ticks++;
+            }
+
+            const float w = float((t - (ticks - 1) / 30.0) * 30.0);
+            const float yaw = cameraYaw(C(s.sample(w, 1.0f / 90.0f, level)));
+            if (f > 6) {
+                const float step = wrapAngle(yaw - prev) * 180.0f / 3.14159265f;
+                worst = std::max(worst, std::fabs(step));
+                least = std::min(least, step);
+            }
+
+            prev = yaw;
+        }
+
+        CHECK(worst < 1.0f);
+        CHECK(least > -0.01f);
+        CHECK(s.cuts() == 0);
+    }
+
+    // The step statistics see the same: no 360 degree step.
+    CameraStepStats stats;
+    for (int i = 0; i < 20; i++) {
+        stats.add(camAt(float(i), 0, 0, 170.0f + float(i)));
+    }
+
+    CHECK(stats.frames == 19);
+    CHECK_NEAR(stats.maxAbs[0], 1.0, 1e-3);
+    CHECK_NEAR(stats.stepSd(0), 0.0, 1e-3);
+    CHECK_NEAR(stats.dMaxAbs[0], 0.0, 1e-3);
+    CHECK_NEAR(stats.maxAbs[2], 1.0, 1e-4);
+    stats.restart();
+    stats.add(camAt(500.0f, 0, 0, 0.0f));  // no step across a cut
+    CHECK(stats.frames == 19);
+}
+
+static void testSmoothTurn() {
+    // The stick curve: nothing inside the 20% deadzone, full speed at full deflection, the power
+    // 1.5 in between, symmetric, monotonic.
+    CHECK_NEAR(smoothTurnRate(0.0f, 120.0f), 0.0, 0.0);
+    CHECK_NEAR(smoothTurnRate(0.19f, 120.0f), 0.0, 0.0);
+    CHECK_NEAR(smoothTurnRate(1.0f, 120.0f), 120.0, 1e-3);
+    CHECK_NEAR(smoothTurnRate(-1.0f, 120.0f), -120.0, 1e-3);
+    CHECK_NEAR(smoothTurnRate(0.6f, 120.0f), 120.0 * std::pow(0.5, 1.5), 1e-3);
+    float prev = 0.0f;
+    bool monotonic = true;
+    for (int i = 0; i <= 100; i++) {
+        const float v = smoothTurnRate(float(i) / 100.0f, 90.0f);
+        monotonic = monotonic && (v >= prev);
+        prev = v;
+    }
+
+    CHECK(monotonic);
+    CHECK_NEAR(smoothTurnRate(1.0f, 500.0f), 360.0, 1e-3);  // the standard's range, 30-360
+
+    // The mapper: held stick X in smooth mode turns by rate x dt each frame, in stereo play only.
+    InputMapper mapper;
+    InputConfig config;
+    config.turnMode = TurnMode::Smooth;
+    config.smoothSpeedDps = 120.0f;
+    InputContext context;
+    context.stereoPlay = true;
+    InputSample sample;
+    sample.valid = true;
+    sample.rStick[0] = 1.0f;
+    float total = 0.0f;
+    for (int f = 0; f < 90; f++) {
+        total += mapper.update(sample, config, context, f / 90.0, 1.0f / 90.0f).turnDeg;
+    }
+
+    CHECK_NEAR(total, 120.0, 0.01);
+    context.stereoPlay = false;
+    CHECK_NEAR(mapper.update(sample, config, context, 1.0, 1.0f / 90.0f).turnDeg, 0.0, 0.0);
+    // Snap: one 45 degree step per push by default.
+    InputMapper snapper;
+    InputConfig snapConfig;
+    context.stereoPlay = true;
+    float snapped = 0.0f;
+    for (int f = 0; f < 30; f++) {
+        snapped += snapper.update(sample, snapConfig, context, f / 90.0, 1.0f / 90.0f).turnDeg;
+    }
+
+    CHECK_NEAR(snapped, 45.0, 0.0);
+
+    // The orbit by an explicit angle: the same as orbitView for a small angle, any number of
+    // turns, the pivot stays put and the distance to it is kept.
+    const Mat4 view = guLookAt({ 100.0f, 30.0f, 200.0f }, { 100.0f, 20.0f, 100.0f }, { 0.0f, 1.0f, 0.0f });
+    float delta = 0.0f;
+    const Mat4 a = orbitView(view, viewHeading(view) + 0.5f, 100.0f, &delta);
+    CHECK_NEAR(delta, 0.5, 1e-5);
+    CHECK(matNear(orbitViewBy(view, 0.5f, 100.0f), a, 1e-4f));
+    CHECK(matNear(orbitViewBy(view, 0.5f + 2.0f * 3.14159265f, 100.0f), a, 2e-3f));
+    const Mat4 far = orbitViewBy(view, 4.0f, 100.0f);  // past pi: no wrap in the other direction
+    CHECK_NEAR(wrapAngle(viewHeading(far) - viewHeading(view)), wrapAngle(4.0f), 1e-4);
+    const Vec3 pivot = { 100.0f, 30.0f, 100.0f };
+    const Vec3 p = viewPosition(far);
+    CHECK_NEAR(std::sqrt((p.x - pivot.x) * (p.x - pivot.x) + (p.z - pivot.z) * (p.z - pivot.z)), 100.0, 1e-2);
+    CHECK_NEAR(p.y, 30.0, 1e-3);
+}
+
 int main() {
     testEyeProjectionMatchesGuPerspective();
     testEyeProjectionAsymmetricEdges();
@@ -1051,6 +1458,14 @@ int main() {
     testOrbitView();
     testHudSolve();
     testCinema();
+    testEyeSize();
+    testCameraPoseFromView();
+    testCameraSmoothingLatency();
+    testCameraSmoothingContinuity();
+    testCameraSmoothingFollower();
+    testCameraSmoothingCuts();
+    testCameraSmoothingWrap();
+    testSmoothTurn();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

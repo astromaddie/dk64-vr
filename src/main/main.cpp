@@ -231,6 +231,16 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
     flags |= SDL_WINDOW_VULKAN;
 #endif
 
+#ifdef DK64_VR
+    // In VR nothing is presented to the desktop window, and SteamVR shows a mapped game window as a
+    // desktop-game panel in its dashboard: black, in front of the launcher. Keep it unmapped.
+    // Real pads keep working without window focus.
+    if (dk64vr::hostActive()) {
+        flags |= SDL_WINDOW_HIDDEN;
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    }
+#endif
+
     window = SDL_CreateWindow("DK64: Recompiled", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,  flags);
 
     if (window == nullptr) {

@@ -4,17 +4,20 @@ Current state of the VR layer in this fork of Donkey Kong 64: Recompiled (N64Rec
 N64ModernRuntime). All VR code is behind the CMake option `DK64_VR`; with it off the flat build is
 unchanged. Chronology, if any is needed, goes in a separate lab log, not here.
 
-Nothing here has been worn. Every row of the status table is headset-unverified.
+Worn twice by the user on 2026-10-06 (builds before this one). Everything changed since is
+headset-unverified, and the status table says so row by row.
 
 ## 1. Target and probe facts
 
 - Native Linux ARM64 title (SDL2 + Vulkan through RT64/plume), devkit title `DK64VR`, compat tool
   `SteamLinuxRuntime_4-arm64`. Persistent data in `$XDG_DATA_HOME`.
 - Display: the platform standard asks for 120 Hz at about 2160 x 2160 an eye. This port renders
-  2160 x 2160 an eye (`resolution_scale` 1.25) and holds 72 Hz there with no missed frames; the eye
-  passes take about 5.8 ms of GPU a frame (section 5b). 90 and 120 Hz are not measured yet: unattended
-  runs get the title's per-app rate, and DK64VR has no per-app entry (72 Hz off-head). Eye images
-  are drawn into the swapchain images through a UNORM view (bits unchanged).
+  2160 x 2160 an eye whatever SteamVR recommends (`resolution_scale` auto, section 5a): SteamVR's
+  per-app resolution moves the recommendation (1728 by default, 2160 with the user's per-app
+  setting), and the old fixed 1.25 then rendered 2700 x 2700 at about 9.4 ms of GPU a frame, so
+  SteamVR ran the app at 60 Hz instead of 120. At 2160 and 72 Hz the eye passes take about 5.8 ms
+  of GPU a frame (section 5b). Unattended runs get the title's per-app rate (the user set DK64VR to
+  120 Hz). Eye images are drawn into the swapchain images through a UNORM view (bits unchanged).
 - Device (2026-10-05, read over SSH): Turnip Adreno 750, Vulkan 1.4, `dualSrcBlend`, descriptor
   indexing, `depthClamp`, `shaderInt64` (no `shaderFloat64`). RT64 needs dual-source blending.
 - ROM: the user's US 1.0 cartridge dump (sha1 cf806ff2...). Never committed.
@@ -78,7 +81,12 @@ Code: `src/vr/xr/xr_host.cpp` (OpenXR host), `lib/rt64/src/hle/rt64_vr.h` (RT64'
   is black), plus the panel quad when no stereo image was produced. The panel is world-locked 2 m ahead
   of the recentred origin, 2.2 m wide.
 - Off in VR: RT64's idle GPU keep-alive thread, its present pacing and frame generation, MSAA and
-  high-precision targets. Nothing is presented to the window.
+  high-precision targets. Nothing is presented to the window, and in VR the window is created
+  hidden (`SDL_WINDOW_HIDDEN`, `dk64vr::hostActive`): a mapped window that is never drawn is what
+  Steam registers as the title's desktop-game overlay (`valve.steam.desktopgame.<appid>`, "DK64:
+  Recompiled", opaque, 0x0), which SteamVR can show as a black panel in front of the launcher
+  (lesson 56; the user's first wear). Real pads still reach SDL without focus
+  (`SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS`).
 - Standby (`shouldRender` false): workloads are still consumed and rendered flat, so the game keeps
   running; nothing is submitted. `force_render` renders anyway with a synthetic straight-ahead head.
 - Session: READY begins it and calls `dk64vr_set_active(1)` (the game patches' VR paths); STOPPING ends
@@ -88,12 +96,22 @@ Code: `src/vr/xr/xr_host.cpp` (OpenXR host), `lib/rt64/src/hle/rt64_vr.h` (RT64'
   publish (`src/game/vr_api.cpp`, `dk64vr_control.h`), after its display lists are out, so no lock is
   held. The XR loop keeps polling at the display rate, and the audio queue runs dry (silence). A quit
   still goes through while frozen (the wait polls the runtime's `exited`).
-- Layers, in submission order: the projection layer (eyes, black under the panel, or the cinema
-  views), the panel quad, the HUD quad, the black blink quad (view space, mode changes), then the
-  pointer's beam and dot, always last (standard.md section 3).
+- Layers, in submission order: the projection layer (eyes, black under the panel, the cinema views,
+  or the frozen world), the fade/dim quad (view space), the panel quad, the HUD quad, the black blink
+  quad (view space, mode changes), then the pointer's beam and dot, always last (standard.md
+  section 3). The fade, dim and blink use the UI image's black column in 16 alpha bands of 4 rows.
 - Stereo or panel: stereo while the game state's scene is gameplay, first person or cutscene and the
   frame has a camera projection; a change must hold for 12 display frames. No game state yet means
-  panel. `diag_force_stereo` ignores the scene.
+  panel (boot logos, title, file select stay on the panel). `diag_force_stereo` ignores the scene.
+- Transitions and pause (`XrHost::updateFreeze`): once in stereo, a map transition, the game's pause
+  menu or a recomp menu no longer flips to the panel. The world freezes at once on the last stereo
+  images, submitted again with the views they were made for (world-locked; the eye passes stop and
+  workloads render flat). A transition fades it to black (0.15 s) and holds; the pause menu dims it
+  (alpha 0.6) and its panel comes in front after 6 frames of pause (latched both ways); a recomp menu
+  dims it and shows its panel at once. The world comes back when the scene has wanted stereo for 6
+  frames, fading in from black (0.3 s). A transition into a menu stays black until the 12-frame latch
+  moves to the panel. No turning while frozen. Logged as `[vr] freeze: ...`, `pause panel`,
+  `menu panel`.
 
 ## 5. Eye camera
 
@@ -129,7 +147,11 @@ reading is the clean one. To be settled at first wear.
 `vr.toml` in the app folder (`$APP_FOLDER_PATH`, `~/.local/share/DK64Recompiled` on the Frame), a
 `[vr]` table of the sfvr registry keys plus the port keys below; `DK64_VR_<KEY>` environment variables
 override it for the run. Port defaults: `refresh_rate` 72 (requested once through the FB extension,
-nearest offered rate), `resolution_scale` 1.25 (2160² from the recommended 1728²).
+nearest offered rate), `resolution_scale` `auto`: an absolute eye size of 2160 on the longer side
+(`dk64vr::eyeSize`, host-tested). A recommendation of 2160 or more is used as it is (scale 1.0), a
+smaller one is scaled up to 2160, both clamped to the runtime's maximum. A number (0.75-1.5) still
+multiplies the recommendation. The log says once `[vr] eye size: resolution_scale auto, recommended
+AxA -> BxB (xS, target 2160, max ...)`.
 
 | Port key | Default | Meaning |
 | --- | --- | --- |
@@ -141,10 +163,14 @@ nearest offered rate), `resolution_scale` 1.25 (2160² from the recommended 1728
 | `diag_exit_seconds` | 0 s | Quit cleanly this long after the session starts |
 | `dump_count`, `dump_interval`, `diag_yaw_step` | 1, 120, 0 | `dump_frame` repeats: e.g. 3, 300, 90 dumps yaw 0, 90 and 180 in one run |
 | `dump_panel_frame` | 0 | Dump the panel every Nth present (up to 40) |
-| `foveation` | `off` | App-owned KHR shading-rate attachment on gameplay eye raster passes: `off`, `low`, `medium`, `high` |
-| `foveation_eye_tracked` | false | Move the sharp region using valid `XR_EXT_eye_gaze_interaction` poses; otherwise use the asymmetric projection centre |
+| `foveation` | `high` | App-owned KHR shading-rate attachment on gameplay eye raster passes: `off`, `low`, `medium`, `high` (default since schema 5: worn, fixed high looked good; at 120 Hz / 2160² it holds 120.0 fps, 3.3 ms of GPU, where off runs 97-105 fps) |
+| `foveation_eye_tracked` | true | Move the sharp region using valid `XR_EXT_eye_gaze_interaction` poses; otherwise use the asymmetric projection centre (worn: "looked invisible"). Every gaze/fixed switch is logged with its session time and count, and `[vr-fov] window:` counts them per 10 s |
 | `dump_foveation` | false | Write `vr-fov-eye{0,1}-N.png`, a visualisation of the submitted rate-map bytes, once and with each eye dump |
-| `port_schema` | 4 | Migration marker: a file below 4 that still holds an old default takes the new one once (world_scale 25, resolution_scale 1.25 then 1.0, refresh_rate 120, hud_distance 2, snap_blink 0.15) |
+| `port_schema` | 5 | Migration marker: a file below 5 that still holds an old default takes the new one once (world_scale 25, resolution_scale 1.25 then 1.0 then 1.25, refresh_rate 120, hud_distance 2, snap_blink 0.15; schema 5: resolution_scale 1.25 to `auto`, foveation off to high, foveation_eye_tracked false to true, snap_angle 30 to 45) |
+| `camera_smoothing` | `medium` | Smoothing of the game camera (the head origin), section 5c: `off` (RT64's linear interpolation), `low` (B-spline through three game frames), `medium`, `high` (plus an orientation follower, 0.06 / 0.12 s) |
+| `diag_camera_seconds` | 0 s | Camera motion without a wearer in stereo play, phases of N s: C-left tap, C-right tap, stick held forward-right, idle |
+| `diag_camera_log` | false | A `[vr-cam]` line every display frame: weight, linear and smoothed camera heading, pitch and position |
+| `diag_turn_stick` | 0 | Right stick X held at this deflection for 4 s, released for 4 s, in stereo play (a snap a hold, or the smooth orbit) |
 | `right_stick_x` | `turn` | `turn`: comfort turn (`turn_mode`, `snap_angle`, `smooth_turn_speed`); `camera`: the game's own C-left/C-right camera swing |
 | `move_from_view` | true | Left stick relative to where you look (`move_relative`: head, left or right hand) instead of the game camera |
 | `snap_blink` | 0 s | Optional black blink after a snap turn (the turn is instant without it) |
@@ -157,10 +183,11 @@ nearest offered rate), `resolution_scale` 1.25 (2160² from the recommended 1728
 | `diag_hud_seconds` | 0 s | Show the game's HUD counters every N s of play (through its own `func_global_asm_806F8BC4`), with an eye and HUD dump half a second later |
 | `diag_start_at` | 0 s | Press Start for 0.2 s (the game's pause menu) |
 
-Standard keys this port uses: `turn_mode` (snap), `snap_angle` (30), `smooth_turn_speed` (120),
+Standard keys this port uses: `turn_mode` (snap; smooth orbits about Donkey Kong, section 8),
+`snap_angle` (45; port default, the user's choice), `smooth_turn_speed` (120),
 `move_relative` (head), `hud_distance` (1.5 m; port default), `hud_scale` (100: 40 degrees wide),
 `hud_visible`, `haptics` (0.6), `dominant_hand` (right: the pointer hand), `head_translation`,
-`refresh_rate` (72; port default), `resolution_scale` (1.25; port default). Not used yet: `vignette`,
+`refresh_rate` (72; port default), `resolution_scale` (`auto`; port default). Not used yet: `vignette`,
 `roomscale`, `lean_limit`, `duck_crouch`, `height_offset`, `seated`, `horizon_lock`,
 `follow_vehicle_rotation`, `camera_shake`, `hud_mode` (only `near` exists).
 
@@ -202,6 +229,57 @@ lists one right-eye pass's draws (`[vr-draw]`). Switches, all on by default: `RT
 sampling), `RT64_VR_EYE_ORDER=swap`, `RT64_VR_RIGHT_TARGET=main`, `RT64_VR_SAME_EYE=1`.
 `[vr] input:` lines log each profile's suggest result, the action set attach, each hand's interaction
 profile and any change of held N64 buttons.
+
+## 5c. Camera smoothing
+
+The game camera is the head origin, so its motion is felt directly: DK64 moves it at 30 Hz, RT64
+interpolates linearly between the last two game frames, so its velocity changes in a step at every
+game frame, and the game's own swings (C-left/C-right, auto-follow, the R re-centre) start and stop
+at full speed. Code: `src/vr/bridge/dk64vr_camsmooth.*` (pure, host-tested), used by
+`XrHost::updateCameraCorrection`.
+
+- History: RT64 reports every new workload's own camera view (the first projection of matrix group
+  5, else 4, else the first perspective one in the main image; `VrWorkloadInfo::cameraView`). The
+  smoother keeps the last three.
+- `low`: a uniform quadratic B-spline through those three (Star Fox VR, lesson 31), evaluated at
+  the display frame's interpolation weight: position and velocity continuous across game frames,
+  half a game frame (17 ms) behind the linear path. `medium` / `high` add a critically damped
+  follower on the camera's orientation only (smoothing time 0.06 / 0.12 s; at a steady turn it
+  lags by rate x time), so a swing's start and stop are eased; position stays on the B-spline so
+  Donkey Kong never drifts in the view.
+- One rigid correction a display frame: inverse(linear) x smoothed, where `linear` reproduces RT64's
+  own interpolation (view rotation slerped, view translation lerped), applied to every camera
+  projection of both eyes before the snap-turn orbit, level pitch and the eye offsets. With
+  smoothing off the correction is the identity; the log's `match=` is the largest distance between
+  RT64's view and the reproduction in a window.
+- Cuts reset the history and the follower to the new camera (no swoop): a scene change, a
+  flat/stereo or cinema change, a recomp menu, and any jump of more than 60 units (4 m) or 52
+  degrees between two game frames (map loads, respawns, cutscene cuts, first-person entry/exit,
+  warps). Never smoothed: first person (the crosshair is the game camera's aim) and the cinema (the
+  authored picture on a screen). Snap turns and recentring are unchanged (the orbit applies after
+  the correction).
+- Default `medium`: the B-spline alone removes the 30 Hz velocity steps but a C-button swing still
+  starts and stops at full speed in about one game frame; 0.06 s eases that while keeping the lag
+  of a fast swing to a few degrees.
+- Diagnostics: with `timing`, `[vr-cam]` every 10 s gives, per display frame, the heading, pitch and
+  position steps (sd, max) and how much the step changes from one frame to the next (sd, max; the
+  abruptness) for the linear camera (`raw`, what `off` shows) and the one shown (`out`);
+  `diag_camera_log` prints every frame; `diag_camera_seconds` drives the camera without a wearer.
+  `[vr-cam] shown:` gives the heading rate after the turn orbit next to the turn the stick requested.
+
+Measured (unattended, 120 Hz, 2160², DK Isles, `diag_camera_seconds=3`: C-left and C-right swings,
+Donkey Kong running in a curve, idle; four steady 10 s windows, `raw` is what `off` shows):
+
+| Per display frame | raw (linear) | out (medium) |
+| --- | --- | --- |
+| Heading step: sd / max | 0.17-0.21 / 1.17 deg | 0.15-0.20 / 1.02-1.04 deg |
+| Heading step change: sd / max | 0.021-0.029 / 0.32-0.51 deg | 0.008-0.010 / 0.043-0.045 deg |
+| Pitch step change: max | 0.017-0.019 deg | 0.003 deg |
+| Position step change: sd / max | 0.14-0.17 / 2.29 units | 0.025-0.042 / 0.30-0.87 units |
+
+So the frame-to-frame change of the heading's speed (the jolt at every 30 Hz game frame and at the
+start and stop of a swing) is about 3x smaller in sd and 7-11x smaller at its worst, the position's
+5x; the overall motion (step sd and max) is unchanged. `match=` stayed at 1.4 units / 0.01 degrees.
 
 ## 5b. Measured (unattended, off-head, Steam launch, 2026-10-06)
 
@@ -266,11 +344,11 @@ Two routes are viable:
   injection contract. It reduces fragment invocations; it does not reduce target memory, geometry,
   framebuffer-copy bandwidth or compositor cost.
 
-The implementation remains off by default until a device A/B measures it. `foveation` is
-`off/low/medium/high`; `foveation_eye_tracked` is false by default. Pure map generation includes
+The device A/B and the user's wear made `high`, eye-tracked, the default at schema 5 (section 5a).
+`foveation` is `off/low/medium/high`. Pure map generation includes
 RT64 target padding, the asymmetric projection centre and tile coverage of the sharp disc.
-Schema 4 and its resolution default 1.25 (2160²) stay unchanged: missing optional foveation keys
-take their off defaults without migrating or resetting user-selected resolutions.
+Missing optional foveation keys take their off defaults without migrating or resetting
+user-selected resolutions (the eye size default is `auto` since schema 5, section 5a).
 
 Implementation: `src/vr/xr/xr_foveation.*` owns feature negotiation, per-eye R8_UINT images, rate
 uploads and diagnostic CPU mirrors. `VrHost::foveatedFramebuffer` selects a cached companion only
@@ -409,7 +487,8 @@ and after at the same camera: `vr-perf` scratch `r01-base2160` vs `r23-parity` (
 
 ## 7. Status
 
-Nothing has been worn. "Unattended" means a Steam launch on the Frame with `force_render`, checked in
+Worn twice (2026-10-06) on earlier builds; the rows changed by the polish work below are
+headset-unverified. "Unattended" means a Steam launch on the Frame with `force_render`, checked in
 logs and dumps (and composites rebuilt from them); it never pressed a button.
 
 | Feature | State |
@@ -420,15 +499,20 @@ logs and dumps (and composites rebuilt from them); it never pressed a button.
 | Frame driver, per-eye replay, eye camera | verified unattended (stereo eye dumps in DK Isles; 70-72 fps at 1728²) |
 | Controller bindings: Frame first, Index and Touch | host-tested (every path against each profile's components, unique names); all three profiles accepted on the device; no button press seen yet |
 | N64 pad merge, View short/hold, stick relative to the view | host-tested; not exercised on the device (no wearer) |
-| Snap turn (instant on screen, game camera follows) | verified unattended (`diag_snap_seconds`: shown heading moves 30 degrees in one frame, the game camera arrives in 4-6 s) |
+| Snap turn (instant on screen, game camera follows) | verified unattended (`diag_snap_seconds`: shown heading moves 30 degrees in one frame, the game camera arrives in 4-6 s); 45 degree default and unwrapped orbit headset-unverified |
+| Smooth orbit about DK (`turn_mode` smooth) | verified unattended (`diag_turn_stick=1`: the shown heading turns at exactly the requested rate, 120 deg/s at full deflection, and stops on release); headset-unverified |
+| Camera smoothing (`camera_smoothing` medium) | host-tested; verified unattended (`[vr-cam]` before/after, section 5c); headset-unverified |
+| Transitions fade in stereo, pause/recomp menu over the frozen dimmed world | verified unattended (intro transitions freeze and fade, pause panel and recomp menu over the frozen world in the layer log); headset-unverified |
+| Hidden desktop window (no black SteamVR box at the launcher) | verified unattended (the `valve.steam.desktopgame.<appid>` overlay is no longer created; launcher and game run); headset-unverified |
+| Eye size `auto` (2160 whatever SteamVR recommends) | verified unattended (recommended 2160 -> 2160 at the user's per-app setting); headset-unverified |
 | Recomp menus on the panel, laser pointer | verified unattended (menu opened by a synthetic View press, synthetic pointer composited last, dot on the panel); clicking not exercised |
-| Game menus, pause menu, transitions on the panel | verified unattended (title, file select, pause menu dumps) |
+| Game menus on the panel (boot, title, file select) | verified unattended (title, file select dumps) |
 | HUD split and HUD quad | verified unattended (text and counters absent from the eyes, present with correct alpha in the HUD image, composite) |
 | 3D cinema with letterbox crop | verified unattended (layer FOV from the screen corners, picture rows between the bars, composites); depth not judged by eye |
 | Pause when unfocused or in standby, quit while paused | verified unattended (game rate 0 Hz while the XR loop runs at 72; clean quit) |
 | Rumble Pak to haptics | built; not exercised (no wearer) |
 | Diagnostics (above) | verified unattended |
-| Vignette, fade (only a 0.2 s black cut), roomscale, seated mode, camera shake off, in-headset VR settings page | not started |
+| Vignette (also during the smooth orbit), fade on flat/stereo/cinema switches (still a 0.2 s black cut), roomscale, seated mode, camera shake off, in-headset VR settings page | not started (the vignette is deferred: it needs its own radial image and an alpha ramp) |
 
 ## 8. Controls
 
@@ -452,7 +536,7 @@ Bindings and the map: `src/vr/bridge/dk64vr_input.{h,cpp}`; OpenXR: `src/vr/xr/x
 | View, hold 1 s | left | recentre, 0.6/80 ms buzz on both hands | as above | as above |
 | D-pad | left | N64 D-pad | none | none |
 | Left stick | left | N64 stick, relative to where you look | left stick | left stick |
-| Right stick X | right | snap turn 30 degrees (`right_stick_x = camera`: the game's C-left/C-right) | right stick | right stick |
+| Right stick X | right | snap turn 45 degrees, or the smooth orbit with `turn_mode = smooth` (`right_stick_x = camera`: the game's C-left/C-right) | right stick | right stick |
 | Right stick Y | right | nothing in play (lesson 80); scrolls menus | right stick | right stick |
 | Right stick click | right | N64 L (unused by the game) | none | right stick click |
 | Left stick click, grips | | nothing | | |
@@ -464,10 +548,18 @@ select, pause) take the N64 pad as usual.
 Turning: the game eases its camera to a new heading over a second or more. A snap writes the camera's
 heading (`CameraPaad::unkB2`, through the `recomp_vr_take_turn` import in the camera patch,
 `patches/sound_options_patches.c` `func_global_asm_8061D1FC`) and, until the camera arrives, the eye
-view is orbited about the camera's look-at point by what it still has to turn (`dk64vr::orbitView`),
-so the wearer sees one instant step and the stick stays aligned. The default is the comfort snap
-because the game's own C-left/C-right is a 45 degree smooth swing of the whole view, which is forced
-smooth rotation. Turning applies in third-person play only, not in first person or cutscenes.
+view is orbited about the camera's look-at point by what it still has to turn
+(`dk64vr::orbitViewBy`), so the wearer sees one instant step and the stick stays aligned. Headings are
+unwrapped, so the view may run any distance ahead of the game's ease. The default is a 45 degree snap
+(the user: 30 felt like the N64's small camera steps). `turn_mode = smooth` orbits the camera about
+Donkey Kong while right stick X is held: 20% deadzone, the rest of the travel to the power 1.5
+(`dk64vr::smoothTurnRate`), up to `smooth_turn_speed` (120 deg/s) at full deflection; each frame's
+step goes to the game's heading the same way, and the orbit shows it at once, so the game's 4-6 s ease
+never shows and the camera smoothing (applied before the orbit) adds no lag to it. Release stops it
+at once. Turning applies in third-person play only, never in first person, the cinema, the panel or a
+frozen world. When the game takes the camera over (C-left/C-right) or the turn times out (8 s after
+the last input), what is left of the orbit unwinds over 0.4 s instead of jumping; a camera cut or a
+mode change ends it.
 
 Haptics: the game's Rumble Pak (ultramodern `set_rumble`) gives 40 ms pulses on both hands while the
 motor runs, scaled by `haptics`; the recentre buzz and a click on menu presses follow standard.md
@@ -505,12 +597,15 @@ a bar shows above or below the picture.
 
 ## 10. Wear checklist (about 15 minutes)
 
-Build: branch `vr-perf`, installed as the `DK64VR` devkit title (binary md5
-`2ccff3825d0f9999a904c68a3a503204`, no diagnostics armed). Before starting: in SteamVR's per-app settings set DK64VR to 72 Hz. Launch from the Steam
+Build: branch `vr-polish`, installed as the `DK64VR` devkit title (binary md5
+`37767855d220d91ccbd351bfb64b8cba`, no diagnostics armed; the device's `vr.toml` has
+`resolution_scale = "auto"`, `snap_angle = 45`, foveation high eye-tracked, camera smoothing medium).
+SteamVR per-app settings for DK64VR: 120 Hz (as the user set it). Launch from the Steam
 library (not SSH). Claim the Frame as `user-wearing`. Read the log afterwards with
 `tools/steam_frame/deploy.sh --logs` (FRAME_HOST=steamos@192.168.1.31).
 
-1. Launcher on the panel (2 min): the DK64 Recompiled launcher appears on a panel 2 m ahead. Point at
+1. Launcher on the panel (2 min): the DK64 Recompiled launcher appears on a panel 2 m ahead, with no
+   black box in front of it (launch from the Steam library in the headset). Point at
    it with the right hand: is there a beam and a dot, flat on the panel, never hidden? Click Start Game
    with the trigger. Then try A and the D-pad instead of the pointer.
 2. Title and file select (1 min): the intro and title play on the cinema screen (3D?), the file select
@@ -519,13 +614,19 @@ library (not SSH). Claim the Frame as `user-wearing`. Read the log afterwards wi
    bubble text readable, in front of the picture, and do bars ever follow your head? Does the screen
    stay put when you turn your head?
 4. DK Isles, first minutes (4 min): walk around. Is DK about 1.7 m tall (`world_scale`)? Does the left
-   stick go where you look? Snap turn with the right stick: one clean 30 degree step, no swing
-   afterwards? Try Y/B (the game's camera swing) once for comparison. Jump (A), attack (X), crouch
-   (LT), first person (RB) and back.
+   stick go where you look? Snap turn with the right stick: one clean 45 degree step, no swing
+   afterwards? Try Y/B (the game's camera swing): does it start and stop gently now (camera
+   smoothing)? Run in circles: does the world still jerk? Look at the palm trees near the start with
+   your eyes, not your head: any pink rings? Jump (A), attack (X), crouch (LT), first person (RB) and
+   back (the crosshair must not lag).
 5. HUD (2 min): collect a banana or get hit so a counter shows. Is the HUD 1.5 m ahead, legible, free of
    roll when you tilt your head, in front of the world everywhere? Any HUD left in the world image?
-6. Pause and menus (2 min): Menu pauses: the pause menu on the panel. View (short) opens the recomp
-   menu: navigate with the stick, click with the trigger, close with View.
+6. Pause, menus and transitions (3 min): Menu pauses: the world stays, dimmed, with the pause menu on
+   the panel in front, and no flicker to a black room. View (short) opens the recomp menu the same
+   way: navigate with the stick, click with the trigger, close with View. Walk through a door to a
+   new area: a fade to black and back, no flat panel in between.
+6b. Smooth orbit (2 min, optional): set `turn_mode = "smooth"` in `vr.toml` (no in-headset VR page yet);
+   hold the right stick: the camera orbits DK at up to 120 deg/s and stops when you let go.
 7. Recentre and focus (1 min): turn your body 90 degrees and hold View 1 s: buzz, view recentred behind
    DK. Lift the headset off for a few seconds: on return the game should have waited.
 8. Answer: scale, HUD distance and size, snap angle, cinema distance and depth, any button that does
@@ -536,9 +637,17 @@ library (not SSH). Claim the Frame as `user-wearing`. Read the log afterwards wi
 - No button press has ever reached the game from the controllers: the input path is host-tested and
   the profiles are accepted on the device, but an unattended run has no wearer. If nothing responds,
   the log's `[vr] input:` lines tell whether samples are live.
-- Snap turn: the game camera takes 4-6 s to arrive; the view is held at the new heading meanwhile. If
-  something else turns the camera during that time (C-left/C-right, a scripted camera), the
-  compensation is dropped and the view may jump to wherever the game camera is.
+- Snap and smooth turns: the game camera takes 4-6 s to arrive; the view is held at the new heading
+  meanwhile. If something else turns the camera during that time (C-left/C-right, the game's own
+  heading changes), the rest unwinds over 0.4 s, a small swing.
+- Pink rings around the palm trees at the start (second wear, foveation high fixed): not reproduced
+  unattended. Gameplay dumps at the start position (foveation off: left eye; high: both eyes at two
+  moments, and the HUD image) have no pink pixel at all (none of 4.7 million an eye), and 1:1 crops of the near and far palms in the
+  coarse periphery look alike. The dark alpha-edge outlines around the palm crowns against the
+  bright sky are the likeliest source of coloured fringes from the lenses' colour correction; to be
+  checked worn with foveation off and high.
+- The pause panel's picture is the game's snapshot of the left eye image, so it shows the
+  hidden-area mask's black corners.
 - The HUD is a 4:3 frame squeezed into 40 degrees; small text may be hard to read, and counters at the
   frame's edges sit 20 degrees off centre.
 - Cutscene depth is computed, not seen: `cinema_depth` 0.6 may be too strong or too weak.
@@ -546,7 +655,7 @@ library (not SSH). Claim the Frame as `user-wearing`. Read the log afterwards wi
   from SteamVR's own menu instead (that path is clean, also while paused).
 - First person: the crosshair follows the game camera's aim, but the head still looks around freely;
   untested.
-- Frame time at 2160² and 72 Hz is unproblematic in the measured scenes (DK Isles, the intro
-  cutscene); busier levels are unmeasured. 90 and 120 Hz have not been run.
+- Frame time: 120.0 fps at 120 Hz and 2160² with foveation high in DK Isles (0-2 missed a 10 s
+  window); busier levels are unmeasured.
 - The hidden-area mask blackens the eye image's periphery; a game effect that later reads the main
   colour image (a pause snapshot) sees those corners black.

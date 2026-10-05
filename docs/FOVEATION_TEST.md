@@ -11,7 +11,7 @@ Based on superproject `15f4830`, RT64 `aab09dc`, plume `716076c`. The coordinato
 in steady DK Isles gameplay; intro-to-gameplay transitions still need to be excluded. This A/B
 now measures 90/120 Hz headroom and peripheral quality. Re-establish the off baseline in this
 combined build: the earlier measurements did not establish the Valve layer's injection state.
-Schema 4 keeps the 2160² default; foveation and eye tracking stay off.
+Schema 5 makes the eye size an absolute 2160² (`resolution_scale = auto`): with SteamVR's per-app resolution at 2160 the old 1.25 rendered 2700². Schema 5 also makes foveation high, eye-tracked, the default (the A/B below sets every key explicitly).
 
 The hidden-area mask and scene foveation both apply to the eye. The mask draws first at 1x1 into
 the same normal colour/depth targets, and the subsequent scene selects the rate attachment.
@@ -55,15 +55,15 @@ FDM_DEBUG=1
 | Run | Exact appended lines |
 | --- | --- |
 | Off, 1728 (optional size control) | `DK64_VR_RESOLUTION_SCALE=1.0`<br>`DK64_VR_FOVEATION=off`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
-| Off, 2160 | `DK64_VR_RESOLUTION_SCALE=1.25`<br>`DK64_VR_FOVEATION=off`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
-| Low, 2160 fixed | `DK64_VR_RESOLUTION_SCALE=1.25`<br>`DK64_VR_FOVEATION=low`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
-| Medium, 2160 fixed | `DK64_VR_RESOLUTION_SCALE=1.25`<br>`DK64_VR_FOVEATION=medium`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
-| High, 2160 fixed | `DK64_VR_RESOLUTION_SCALE=1.25`<br>`DK64_VR_FOVEATION=high`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
-| Low, 2160 gaze | `DK64_VR_RESOLUTION_SCALE=1.25`<br>`DK64_VR_FOVEATION=low`<br>`DK64_VR_FOVEATION_EYE_TRACKED=1`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
-| Medium, 2160 gaze | `DK64_VR_RESOLUTION_SCALE=1.25`<br>`DK64_VR_FOVEATION=medium`<br>`DK64_VR_FOVEATION_EYE_TRACKED=1`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
-| High, 2160 gaze | `DK64_VR_RESOLUTION_SCALE=1.25`<br>`DK64_VR_FOVEATION=high`<br>`DK64_VR_FOVEATION_EYE_TRACKED=1`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
-| Valve allowed, 2160 | `DK64_VR_RESOLUTION_SCALE=1.25`<br>`DK64_VR_FOVEATION=off`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=0` |
-| Layer conflict guard, 2160 | `DK64_VR_RESOLUTION_SCALE=1.25`<br>`DK64_VR_FOVEATION=high`<br>`DK64_VR_FOVEATION_EYE_TRACKED=1`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=0` |
+| Off, 2160 | `DK64_VR_RESOLUTION_SCALE=auto`<br>`DK64_VR_FOVEATION=off`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
+| Low, 2160 fixed | `DK64_VR_RESOLUTION_SCALE=auto`<br>`DK64_VR_FOVEATION=low`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
+| Medium, 2160 fixed | `DK64_VR_RESOLUTION_SCALE=auto`<br>`DK64_VR_FOVEATION=medium`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
+| High, 2160 fixed | `DK64_VR_RESOLUTION_SCALE=auto`<br>`DK64_VR_FOVEATION=high`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
+| Low, 2160 gaze | `DK64_VR_RESOLUTION_SCALE=auto`<br>`DK64_VR_FOVEATION=low`<br>`DK64_VR_FOVEATION_EYE_TRACKED=1`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
+| Medium, 2160 gaze | `DK64_VR_RESOLUTION_SCALE=auto`<br>`DK64_VR_FOVEATION=medium`<br>`DK64_VR_FOVEATION_EYE_TRACKED=1`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
+| High, 2160 gaze | `DK64_VR_RESOLUTION_SCALE=auto`<br>`DK64_VR_FOVEATION=high`<br>`DK64_VR_FOVEATION_EYE_TRACKED=1`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=1` |
+| Valve allowed, 2160 | `DK64_VR_RESOLUTION_SCALE=auto`<br>`DK64_VR_FOVEATION=off`<br>`DK64_VR_FOVEATION_EYE_TRACKED=0`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=0` |
+| Layer conflict guard, 2160 | `DK64_VR_RESOLUTION_SCALE=auto`<br>`DK64_VR_FOVEATION=high`<br>`DK64_VR_FOVEATION_EYE_TRACKED=1`<br>`DISABLE_VULKAN_FDM_INJECTION_LAYER=0` |
 
 The last run must say `backend=off reason=Valve-layer-selected`: Vulkan forbids enabling FDM and
 KHR attachment shading rate together. It tests the guard, not our high preset's performance. The

@@ -72,6 +72,9 @@ Vec3 viewPosition(const Mat4 &view);
 // camera itself orbits) by whatever the game camera has still to turn, so the view shows the
 // target heading at once. Returns the orbited view; *delta gets the remaining turn.
 Mat4 orbitView(const Mat4 &view, float targetHeadingRad, float pivotDistance, float *delta);
+// The same orbit by an explicit angle (counter-clockwise from above, any size: smooth turning
+// can run a whole turn or more ahead of the game camera's ease).
+Mat4 orbitViewBy(const Mat4 &view, float deltaRad, float pivotDistance);
 float wrapAngle(float radians);  // to -pi..pi
 
 // 3D cinema (standard.md section 4, lessons 45 and 82). The game camera's picture goes on a
@@ -133,5 +136,16 @@ struct FogRemap {
 };
 FogRemap fogRemap(const Mat4 &gameProj, const Mat4 &eyeProj);
 float depthToZw(const Mat4 &proj, float depth);
+
+// The eye image size (standard.md section 9). resolutionScale > 0 multiplies the runtime's
+// recommended size. 0 is `auto`: an absolute target of `target` pixels on the longer side
+// (about the Frame's panel, the standard's 2160 reference), so the recommendation is used as it
+// is when it already reaches the target (SteamVR's per-app resolution can raise it) and scaled
+// up to the target otherwise. Either way clamped to the runtime's maximum, and even.
+struct EyeSize {
+    uint32_t width = 0, height = 0;
+    double scale = 1.0;  // the factor applied to the recommendation
+};
+EyeSize eyeSize(uint32_t recommendedWidth, uint32_t recommendedHeight, uint32_t maxWidth, uint32_t maxHeight, double resolutionScale, uint32_t target = 2160);
 
 }

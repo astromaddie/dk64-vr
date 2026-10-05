@@ -1,5 +1,6 @@
 #include "dk64vr_input.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "sfvr/sfvr_turn.h"
@@ -148,6 +149,12 @@ void rotateStick(float yawRad, float &x, float &y) {
     y = ry;
 }
 
+float smoothTurnRate(float stickX, float speedDps) {
+    const float d = sfvr_turn_deadzoned(clamp1(stickX), 0.2f);
+    const float speed = sfvr_turn_normalise_smooth_speed(speedDps);
+    return ((d < 0.0f) ? -1.0f : 1.0f) * std::pow(std::fabs(d), 1.5f) * speed;
+}
+
 void mergeN64(uint16_t &buttons, float &x, float &y, const InputResult &vr) {
     buttons |= vr.buttons;
     if ((vr.stickX * vr.stickX + vr.stickY * vr.stickY) > (x * x + y * y)) {
@@ -260,6 +267,10 @@ InputResult InputMapper::update(const InputSample &s, const InputConfig &config,
         sfvr_turn_state state = { turnDisarmed };
         r.turnDeg = sfvr_turn_update(&state, &turn, rx, dtS);
         turnDisarmed = state.disarmed;
+        if (config.turnMode == TurnMode::Smooth) {
+            // The orbit about Donkey Kong: a softer curve than the standard's linear one.
+            r.turnDeg = smoothTurnRate(rx, config.smoothSpeedDps) * std::clamp(dtS, 0.0f, 0.1f);
+        }
     }
     else {
         turnDisarmed = 0;

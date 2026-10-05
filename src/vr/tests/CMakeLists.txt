@@ -9,6 +9,7 @@ set(DK64VR_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../..)
 add_executable(dk64vr_tests
     ${CMAKE_CURRENT_LIST_DIR}/dk64vr_tests.cpp
     ${DK64VR_ROOT}/src/vr/bridge/dk64vr_math.cpp
+    ${DK64VR_ROOT}/src/vr/bridge/dk64vr_camsmooth.cpp
     ${DK64VR_ROOT}/src/vr/bridge/dk64vr_foveation.cpp
     ${DK64VR_ROOT}/src/vr/bridge/dk64vr_sched.cpp
     ${DK64VR_ROOT}/src/vr/bridge/dk64vr_settings.c

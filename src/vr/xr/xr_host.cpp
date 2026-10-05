@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <cinttypes>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -30,6 +31,7 @@
 #include "hle/rt64_vr.h"
 #include "render/rt64_render_worker.h"
 
+#include "dk64vr_camsmooth.h"
 #include "dk64vr_game_state.h"
 #include "dk64vr_input.h"
 #include "dk64vr_control.h"
@@ -473,7 +475,7 @@ public:
         const double now = monotonicSeconds();
         probing = (setting("probe_seconds") > 0.0) && ((now - sessionStartS) < setting("probe_seconds"));
         updateStereoLatch();
-        if (!probing && stereoLatched) {
+        if (!probing && stereoLatched && !frozen) {
             frameMode = RT64::VrFrame::Mode::Stereo;
             frame.eyeWidth = eyeChain[0].width;
             frame.eyeHeight = eyeChain[0].height;
@@ -500,6 +502,34 @@ public:
         const double tickBefore = scheduler.tick_s;
         if (scheduler.arrive(at, tick) && ((scheduler.rebases == 1) || (std::fabs(tickBefore - scheduler.tick_s) > 1e-9) || (setting("timing") != 0.0))) {
             dk64vr_logf("scheduler: anchored at %.1f Hz (rebase %" PRIu64 ", offset %.1f ms)", 1.0 / scheduler.tick_s, scheduler.rebases, scheduler.last_offset_s * 1000.0);
+        }
+
+        // The camera smoothing's history: every game frame's own camera (docs 5c). A scene
+        // change, a mode change or a jump in the camera resets it (no swoop across a cut).
+        if (info.cameraViewValid) {
+            const dk64vr_game_state state = gameState();
+            const bool sceneCut = (state.frame != 0) && (state.scene != camTickScene);
+            camTickScene = state.scene;
+            const bool cut = camSmoother.addTick(toMat4(info.cameraView), sceneCut);
+            if (cut) {
+                camWindowCuts++;
+                camRawStats.restart();
+                camOutStats.restart();
+                camShownStats.restart();
+                if (turnActive || (turnReleaseFrom != 0.0f)) {
+                    // A camera cut mid-turn (respawn, warp): the turn is over, nothing to orbit.
+                    turnActive = false;
+                    turnDelta = turnShownDelta = turnReleaseFrom = 0.0f;
+                }
+
+                headingValid = false;
+                if (camLogCuts()) {
+                    dk64vr_logpf("[vr-cam]", "cut (%s) at game frame %u", sceneCut ? "scene change" : "camera jump", state.frame);
+                }
+            }
+        }
+        else if (camSmoother.ready()) {
+            camSmoother.reset();
         }
 
         if ((info.cameraProjections > 0) != cameraSeen) {
@@ -592,30 +622,34 @@ public:
             return;
         }
 
-        if (turnActive) {
+        // Camera smoothing: one rigid correction for the display frame, applied to every camera
+        // projection of both eyes (docs 5c).
+        if (camCorrectionFrame != frameCount) {
+            updateCameraCorrection(gameView);
+        }
+
+        gameView = mul(gameView, camCorrection);
+
+        // Turning (snap or smooth): the view shows the target heading at once, orbited about the
+        // game camera's look-at point by what the game camera still has to turn; the game eases
+        // its camera after it. Headings are unwrapped, so a smooth turn may run any distance ahead.
+        if (turnFrame != frameCount) {
+            turnFrame = frameCount;
+            updateTurn(gameView);
+        }
+
+        if (turnShownDelta != 0.0f) {
             const dk64vr_game_state state = gameState();
             const float dx = state.cam_at[0] - state.cam_eye[0], dz = state.cam_at[2] - state.cam_eye[2];
-            float delta = 0.0f;
-            gameView = orbitView(gameView, turnTarget, std::sqrt(dx * dx + dz * dz), &delta);
-            if (eye == 0) {
-                turnDelta = delta;
-                // Done when the game camera arrives; given up when it takes too long, when
-                // something else turns it (the gap grows past 60 degrees, or C-left/C-right is
-                // pressed), or outside play.
-                const bool settled = std::fabs(delta) < 0.004f;
-                const bool timedOut = (displayS - turnStartS) > 8.0;
-                const bool overtaken = (std::fabs(delta) > 1.05f) || ((latestInput.buttons & (n64::CLeft | n64::CRight)) != 0);
-                if (settled || timedOut || overtaken || (state.scene != DK64VR_SCENE_GAMEPLAY)) {
-                    dk64vr_logf("turn: game camera %s after %.2f s (%.1f deg left)", settled ? "arrived" : (timedOut ? "timed out" : (overtaken ? "turned by the game" : "left gameplay")),
-                        displayS - turnStartS, delta * 180.0f / 3.1415926f);
-                    turnActive = false;
-                    turnDelta = 0.0f;
-                }
-            }
+            gameView = orbitViewBy(gameView, turnShownDelta, std::sqrt(dx * dx + dz * dz));
         }
 
         if (eye == 0) {
             shownHeading = viewHeading(gameView);
+            if (shownStatsFrame != frameCount) {
+                shownStatsFrame = frameCount;  // once a frame (a frame can have several camera projections)
+                camShownStats.add(cameraPoseFromView(gameView));
+            }
         }
 
         if (setting("level_pitch") != 0.0) {
@@ -740,8 +774,15 @@ public:
             centre = gazeCentre(eyeFov[eye], quatRotate(rotation, { 0, 0, -1 }));
         }
         if (eye == 0 && (gazeState < 0 || gazeState != int(tracked))) {
+            if (gazeState >= 0) {
+                gazeSwitches++;
+                gazeSwitchesWindow++;
+            }
+
             gazeState = int(tracked);
-            dk64vr_logpf("[vr-fov]", "centre_source=%s (sampled once at predictedDisplayTime)", tracked ? "eye-gaze" : "fixed-projection");
+            // Dropouts: when gaze went invalid or came back, and how often (also per [vr-perf] window).
+            dk64vr_logpf("[vr-fov]", "centre_source=%s at t=%.3f s (session), switch %" PRIu64 " (sampled once at predictedDisplayTime)", tracked ? "eye-gaze" : "fixed-projection",
+                monotonicSeconds() - sessionStartS, gazeSwitches);
         }
         auto result = foveation.framebuffer(eye, commands, framebuffer, eyeChain[eye].width, eyeChain[eye].height, centre, frameCount);
         foveatedEye[eye] = foveatedEye[eye] || result != framebuffer;
@@ -835,9 +876,15 @@ public:
         extraQuads.clear();
         extraQuads.reserve(8);
         bool stereoShown = false;
+        XrCompositionLayerQuad fadeQuad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         if (rendering) {
             stereoShown = (frameMode == RT64::VrFrame::Mode::Stereo) && eyesRecorded[0] && eyesRecorded[1];
-            if (!stereoShown) {
+            const bool frozenShown = !stereoShown && frozen && haveFrozenViews && !probing;
+            if (frozenShown) {
+                // The last stereo images, released already, with the views they were made for.
+                blackImages = 0;
+            }
+            else if (!stereoShown) {
                 // The probe colours, or black under the panel (lessons 56 and 82: always submit a
                 // projection layer). Black needs drawing only until every image of both eye
                 // swapchains is black; after that the layer shows the last released image.
@@ -920,12 +967,33 @@ public:
                 cinemaHudSize[1] = (frameUp - frameDown) * unitsPerTan;
             }
 
+            if (stereoShown) {
+                frozenViews[0] = views[0];
+                frozenViews[1] = views[1];
+                haveFrozenViews = true;
+            }
+            else if (frozenShown) {
+                views[0] = frozenViews[0];
+                views[1] = frozenViews[1];
+            }
+
             projection.space = localSpace;
             projection.viewCount = 2;
             projection.views = views;
             layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&projection));
 
-            const bool panelShown = !stereoShown && !probing;
+            // The transition fade and the pause dim: view-locked black over the world, under the
+            // panel.
+            stepFade();
+            const int fadeLevel = int(std::lround(fadeAlpha * float(FadeLevels - 1)));
+            if (uiReady && (fadeLevel > 0)) {
+                Pose ahead;
+                ahead.p = { 0.0f, 0.0f, -0.3f };
+                fadeQuad = uiQuad(viewSpace, ahead, 96, 32, 3.0f, 3.0f, fadeLevel);
+                layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&fadeQuad));
+            }
+
+            const bool panelShown = !stereoShown && !probing && (!frozen || pausePanel || menuPanel);
             if (panelShown && panelReady.load()) {
                 const float width = float(setting("panel_width"));
                 const Pose panel = panelPose();
@@ -950,7 +1018,7 @@ public:
             if (uiReady && (displayS < blinkUntilS)) {
                 Pose ahead;
                 ahead.p = { 0.0f, 0.0f, -0.3f };
-                extraQuads.push_back(uiQuad(viewSpace, ahead, 96, 32, 3.0f, 3.0f));
+                extraQuads.push_back(uiQuad(viewSpace, ahead, 96, 32, 3.0f, 3.0f, FadeLevels - 1));
             }
 
             addPointerLayers(extraQuads);
@@ -965,7 +1033,7 @@ public:
             }
 
             panelWanted = !stereoShown;
-            panelShownLast = !stereoShown && !probing && panelReady.load();
+            panelShownLast = panelShown && panelReady.load();
         }
 
         XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
@@ -1020,6 +1088,11 @@ public:
                     hudPartChanges[0], hudPartChanges[1], hudPartChanges[2], hudPartChanges[3], hudPartChanges[4], hudPartChanges[5], hudPartChanges[6],
                     foveatedPasses - perfWindowFoveatedPasses, foveationName(FoveationLevel(int(setting("foveation")))));
                 perfWindowFoveatedPasses = foveatedPasses;
+                if (haveEyeGaze && foveation.enabled()) {
+                    printf("[vr-fov] window: gaze switches %u (total %" PRIu64 "), centre_source=%s\n", gazeSwitchesWindow, gazeSwitches, (gazeState == 1) ? "eye-gaze" : "fixed-projection");
+                }
+
+                gazeSwitchesWindow = 0;
                 if (statFrames > 0) {
                     const double n = double(statFrames);
                     auto avg = [&](int e, int k) { return statSum[e][k] / n; };
@@ -1027,6 +1100,7 @@ public:
                         avg(0, 10), avg(1, 10), avg(0, 0), avg(1, 0), statMax[0], statMax[1], avg(0, 1), avg(1, 1), avg(0, 11), avg(1, 11), avg(0, 12), avg(1, 12), avg(0, 2), avg(1, 2), avg(0, 3), avg(1, 3),
                         avg(1, 4), avg(1, 5), avg(1, 6), avg(0, 7), avg(1, 7), avg(1, 8), avg(1, 9));
                 }
+                logCameraWindow();
                 statFrames = 0;
                 std::fill(&statSum[0][0], &statSum[0][0] + 2 * 13, 0.0);
                 statMax[0] = statMax[1] = 0.0;
@@ -1149,8 +1223,16 @@ private:
     }
 
     void logSettings() {
-        dk64vr_logf("settings: world_scale %.1f, resolution_scale %.2f, refresh_rate %d, level_pitch %d, force_render %d, diag_yaw %.0f, dump_frame %d, probe_seconds %.1f, diag_autostart %.0f, diag_exit_seconds %.0f, diag_force_stereo %d, timing %d",
-            setting("world_scale"), setting("resolution_scale"), int(setting("refresh_rate")), int(setting("level_pitch")), int(setting("force_render")),
+        char scaleText[16];
+        if (setting("resolution_scale") == DK64VR_RESOLUTION_AUTO) {
+            snprintf(scaleText, sizeof(scaleText), "auto");
+        }
+        else {
+            snprintf(scaleText, sizeof(scaleText), "%.2f", setting("resolution_scale"));
+        }
+
+        dk64vr_logf("settings: world_scale %.1f, resolution_scale %s, camera_smoothing %s, refresh_rate %d, level_pitch %d, force_render %d, diag_yaw %.0f, dump_frame %d, probe_seconds %.1f, diag_autostart %.0f, diag_exit_seconds %.0f, diag_force_stereo %d, timing %d",
+            setting("world_scale"), scaleText, cameraSmoothingName(CameraSmoothing(int(setting("camera_smoothing")))), int(setting("refresh_rate")), int(setting("level_pitch")), int(setting("force_render")),
             setting("diag_yaw"), int(setting("dump_frame")), setting("probe_seconds"), setting("diag_autostart"), setting("diag_exit_seconds"),
             int(setting("diag_force_stereo")), int(setting("timing")));
         diagYawDeg = float(setting("diag_yaw"));
@@ -1195,15 +1277,19 @@ private:
             return;
         }
 
+        // resolution_scale auto: about 2160 an eye whatever SteamVR recommends (its per-app
+        // resolution moves the recommendation); a number multiplies the recommendation.
         const double scale = setting("resolution_scale");
-        uint32_t eyeSize[2];
         const uint32_t recommended[2] = { configViews[0].recommendedImageRectWidth, configViews[0].recommendedImageRectHeight };
         const uint32_t maximum[2] = { configViews[0].maxImageRectWidth, configViews[0].maxImageRectHeight };
-        for (int i = 0; i < 2; i++) {
-            uint32_t v = uint32_t(std::lround(double(recommended[i]) * scale));
-            v = std::min(v, maximum[i]);
-            v &= ~1U;
-            eyeSize[i] = std::max(v, 2U);
+        const EyeSize chosen = dk64vr::eyeSize(recommended[0], recommended[1], maximum[0], maximum[1], scale);
+        const uint32_t eyeSize[2] = { chosen.width, chosen.height };
+        if (scale == DK64VR_RESOLUTION_AUTO) {
+            dk64vr_logf("eye size: resolution_scale auto, recommended %ux%u -> %ux%u (x%.3f, target 2160, max %ux%u)", recommended[0], recommended[1],
+                eyeSize[0], eyeSize[1], chosen.scale, maximum[0], maximum[1]);
+        }
+        else {
+            dk64vr_logf("eye size: resolution_scale %.2f, recommended %ux%u -> %ux%u (max %ux%u)", scale, recommended[0], recommended[1], eyeSize[0], eyeSize[1], maximum[0], maximum[1]);
         }
 
         uint32_t formatCount = 0;
@@ -1216,8 +1302,8 @@ private:
         }
 
         auto has = [&](VkFormat f) { return std::find(formats.begin(), formats.end(), int64_t(f)) != formats.end(); };
-        dk64vr_logpf("[openxr]", "recommended eye %ux%u (max %ux%u), using %ux%u (resolution_scale %.2f); swapchain formats: %s",
-            recommended[0], recommended[1], maximum[0], maximum[1], eyeSize[0], eyeSize[1], scale, formatList.c_str());
+        dk64vr_logpf("[openxr]", "recommended eye %ux%u (max %ux%u), using %ux%u (x%.3f); swapchain formats: %s",
+            recommended[0], recommended[1], maximum[0], maximum[1], eyeSize[0], eyeSize[1], chosen.scale, formatList.c_str());
 
         // RT64's main color image is RGBA8 UNORM holding gamma-encoded colour: copied raw into an
         // sRGB image it is decoded once by the compositor (lessons 8, 42).
@@ -1606,14 +1692,26 @@ private:
         const char *why;
         const bool uiWanted = uiCapturing || (monotonicSeconds() < uiRequestUntilS);
         if (uiWanted) {
-            // A recomp menu (or a toggle on its way): the panel at once, no hysteresis.
-            if (stereoLatched) {
-                stereoLatched = false;
-                latchCount = 0;
-                dk64vr_logf("mode: panel (recomp menu)");
+            // A recomp menu (or a toggle on its way): the panel at once, no hysteresis. Over
+            // stereo play it goes in front of the frozen, dimmed world (updateFreeze), which
+            // comes back when the menu closes.
+            if (stereoLatched && !menuPanel) {
+                menuPanel = true;
+                if (!frozen) {
+                    frozen = true;
+                    freezeLiveCount = 0;
+                    dk64vr_logf("freeze: recomp menu (stereo world held%s)", haveFrozenViews ? "" : ", no image yet: black");
+                }
+
+                fadeTarget = 0.6f;
+                dk64vr_logf("menu panel: on");
             }
 
             return;
+        }
+        else if (menuPanel) {
+            menuPanel = false;
+            dk64vr_logf("menu panel: off");
         }
         else if (setting("diag_force_stereo") != 0.0) {
             want = cameraSeen;
@@ -1623,6 +1721,11 @@ private:
             const bool cutscenePanel = (state.scene == DK64VR_SCENE_CUTSCENE) && (int(setting("cutscenes")) == 2);
             want = sceneIsStereo(state.scene) && cameraSeen && !cutscenePanel;
             why = cutscenePanel ? "cutscenes on the panel" : sceneName(state.scene);
+            // Map transitions and the pause menu keep the stereo world (frozen, faded or dimmed:
+            // updateFreeze) instead of flipping to the panel and back.
+            if (stereoLatched && sceneHolds(state.scene)) {
+                want = true;
+            }
         }
         else {
             want = false;
@@ -1635,11 +1738,17 @@ private:
                 stereoLatched = want;
                 latchCount = 0;
                 transitionBlink();
+                resetCameraSmoothing();
                 dk64vr_logf("mode: %s (%s, %u camera projection(s))", want ? "stereo" : "panel", why, lastInfo.cameraProjections);
             }
         }
         else {
             latchCount = 0;
+        }
+
+        updateFreeze(state, published);
+        if (frozen) {
+            return;  // the cinema stays as it was until the world is live again
         }
 
         // The 3D cinema for cutscenes and scripted cameras (standard.md section 4), latched with
@@ -1651,11 +1760,217 @@ private:
                 cinemaLatchCount = 0;
                 cinemaAnchored = false;
                 transitionBlink();
+                resetCameraSmoothing();
                 dk64vr_logf("cinema: %s", cinemaActive ? "on" : "off");
             }
         }
         else {
             cinemaLatchCount = 0;
+        }
+    }
+
+    static bool sceneHolds(int32_t scene) {
+        return (scene == DK64VR_SCENE_TRANSITION) || (scene == DK64VR_SCENE_PAUSE);
+    }
+
+    // Transitions and the pause menu in stereo (docs section 4, "Transitions and pause"): the
+    // world freezes at once on the last stereo images (submitted again with their own poses, so
+    // they stay world-locked), a map transition fades it to black, the pause menu dims it and
+    // puts the panel in front after 6 frames. The world comes back when the scene has wanted
+    // stereo for 6 frames, fading in from black. Single-frame flips never show (lesson 71).
+    void updateFreeze(const dk64vr_game_state &state, bool published) {
+        const bool hold = stereoLatched && published && sceneHolds(state.scene);
+        const bool live = published && sceneIsStereo(state.scene) && cameraSeen;
+        if (!stereoLatched) {
+            frozen = false;
+            pausePanel = menuPanel = false;
+            freezeLiveCount = pauseCount = 0;
+            fadeTarget = 0.0f;
+            return;
+        }
+
+        if (hold && !frozen) {
+            frozen = true;
+            freezeLiveCount = 0;
+            dk64vr_logf("freeze: %s (stereo world held%s)", sceneName(state.scene), haveFrozenViews ? "" : ", no image yet: black");
+        }
+
+        if (frozen) {
+            if (live && !hold && !menuPanel) {
+                if (++freezeLiveCount >= 6) {
+                    frozen = false;
+                    pausePanel = false;
+                    pauseCount = 0;
+                    resetCameraSmoothing();
+                    dk64vr_logf("freeze: off (%s)", sceneName(state.scene));
+                }
+            }
+            else {
+                freezeLiveCount = 0;
+            }
+        }
+
+        // The pause menu's panel, latched both ways.
+        const bool pauseWant = frozen && published && (state.scene == DK64VR_SCENE_PAUSE);
+        if (pauseWant != pausePanel) {
+            if (++pauseCount >= 6) {
+                pausePanel = pauseWant;
+                pauseCount = 0;
+                dk64vr_logf("pause panel: %s", pausePanel ? "on" : "off");
+            }
+        }
+        else {
+            pauseCount = 0;
+        }
+
+        fadeTarget = !frozen ? 0.0f : (((state.scene == DK64VR_SCENE_TRANSITION) && !pausePanel) ? 1.0f : ((pausePanel || menuPanel) ? 0.6f : fadeTarget));
+    }
+
+    // The fade quad's alpha moves towards its target: to black in 0.15 s, back in 0.3 s.
+    void stepFade() {
+        const float dt = float(std::clamp(periodS, 0.0, 0.1));
+        if (fadeAlpha < fadeTarget) {
+            fadeAlpha = std::min(fadeTarget, fadeAlpha + dt / 0.15f);
+        }
+        else if (fadeAlpha > fadeTarget) {
+            fadeAlpha = std::max(fadeTarget, fadeAlpha - dt / 0.3f);
+        }
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // Camera smoothing (dk64vr_camsmooth.h, docs 5c)
+
+    CameraSmoothing cameraSmoothingLevel() const {
+        if (cinemaActive || !camSmoother.ready()) {
+            return CameraSmoothing::Off;
+        }
+
+        // First person: the crosshair is the game camera's aim, so no lag there.
+        const dk64vr_game_state state = gameState();
+        if (state.scene == DK64VR_SCENE_FIRST_PERSON) {
+            return CameraSmoothing::Off;
+        }
+
+        return CameraSmoothing(std::clamp(int(setting("camera_smoothing")), 0, 3));
+    }
+
+    bool camLogCuts() const {
+        return (setting("timing") != 0.0) || (setting("diag_camera_log") != 0.0) || (setting("diag_camera_seconds") > 0.0);
+    }
+
+    void resetCameraSmoothing() {
+        camSmoother.reset();
+        camRawStats.restart();
+        camOutStats.restart();
+        camShownStats.restart();
+        headingValid = false;
+        turnActive = false;
+        turnDelta = turnShownDelta = turnReleaseFrom = 0.0f;
+        camCorrection = Mat4();
+    }
+
+    // Once per display frame, at its first camera projection: the correction from RT64's linear
+    // camera (which the smoother reproduces) to the smoothed one, inverse(linear) * smoothed, so
+    // gameView * correction is the smoothed view. `firstView` is RT64's view of that projection,
+    // logged against the reproduction (match=).
+    void updateCameraCorrection(const Mat4 &firstView) {
+        camCorrectionFrame = frameCount;
+        camCorrection = Mat4();
+        if (!camSmoother.ready()) {
+            camLastSampleS = displayS;
+            return;
+        }
+
+        const CameraSmoothing level = cameraSmoothingLevel();
+        if (level != camLevelLogged) {
+            camLevelLogged = level;
+            dk64vr_logpf("[vr-cam]", "smoothing %s (B-spline %s, orientation follower %.2f s)", cameraSmoothingName(level), (level == CameraSmoothing::Off) ? "off" : "on",
+                cameraFollowTime(level));
+        }
+
+        const float w = scheduler.weight(displayS);
+        const float dt = (camLastSampleS > 0.0) ? float(std::clamp(displayS - camLastSampleS, 0.0, 0.1)) : float(periodS);
+        camLastSampleS = displayS;
+        const Mat4 linearView = camSmoother.linear(w);
+        const Mat4 smoothView = camSmoother.sample(w, dt, level);
+        camCorrection = mul(rigidInverse(linearView), smoothView);
+
+        // Diagnostics: the linear (what smoothing off shows) and the smoothed camera's steps.
+        const Pose raw = cameraPoseFromView(linearView), out = cameraPoseFromView(smoothView);
+        camRawStats.add(raw);
+        camOutStats.add(out);
+        const Pose rt64 = cameraPoseFromView(firstView);
+        const float matchPos = std::sqrt((rt64.p.x - raw.p.x) * (rt64.p.x - raw.p.x) + (rt64.p.y - raw.p.y) * (rt64.p.y - raw.p.y) + (rt64.p.z - raw.p.z) * (rt64.p.z - raw.p.z));
+        camMatchPos = std::max(camMatchPos, double(matchPos));
+        camMatchDeg = std::max(camMatchDeg, double(quatAngle(rt64.q, raw.q)) * 180.0 / 3.14159265);
+        if (setting("diag_camera_log") != 0.0) {
+            dk64vr_logpf("[vr-cam]", "f %" PRIu64 " t %.4f w %.3f raw yaw %.3f pitch %.3f pos %.2f %.2f %.2f out yaw %.3f pitch %.3f pos %.2f %.2f %.2f", frameCount, displayS, w,
+                cameraYaw(raw) * 57.2957795, cameraPitch(raw) * 57.2957795, raw.p.x, raw.p.y, raw.p.z,
+                cameraYaw(out) * 57.2957795, cameraPitch(out) * 57.2957795, out.p.x, out.p.y, out.p.z);
+        }
+    }
+
+    // The [vr-cam] window summary, with the [vr-perf] line: per display frame, the camera's
+    // heading, pitch and position steps (sd, max) and how much the step changes from one frame
+    // to the next (sd, max: the abruptness the wearer feels), for the linear camera (raw) and the
+    // one shown (out).
+    void logCameraWindow() {
+        if (camOutStats.frames > 0) {
+            auto part = [](const CameraStepStats &st, char *buffer, size_t size) {
+                snprintf(buffer, size, "yaw step sd %.3f max %.3f chg sd %.3f max %.3f deg, pitch step sd %.3f max %.3f chg sd %.3f max %.3f deg, pos step sd %.3f max %.3f chg sd %.3f max %.3f units",
+                    st.stepSd(0), st.maxAbs[0], st.changeSd(0), st.dMaxAbs[0], st.stepSd(1), st.maxAbs[1], st.changeSd(1), st.dMaxAbs[1], st.stepSd(2), st.maxAbs[2], st.changeSd(2), st.dMaxAbs[2]);
+            };
+            char raw[400], out[400];
+            part(camRawStats, raw, sizeof(raw));
+            part(camOutStats, out, sizeof(out));
+            printf("[vr-cam] smoothing=%s frames=%u cuts=%u match=%.3f units/%.3f deg | raw: %s | out: %s\n", cameraSmoothingName(camLevelLogged), camOutStats.frames, camWindowCuts,
+                camMatchPos, camMatchDeg, raw, out);
+            // The view as shown (after the turn's orbit): its mean heading rate and the turn
+            // requested from the stick in the window.
+            const double windowS = (camShownStats.frames > 0) ? double(camShownStats.frames) * periodS : 0.0;
+            printf("[vr-cam] shown: yaw rate %.1f deg/s (mean step %.3f, sd %.3f, max %.3f, chg max %.3f deg), turn requested %.1f deg (%.1f deg/s)\n",
+                (windowS > 0.0) ? camShownStats.sum[0] / windowS : 0.0, (camShownStats.frames > 0) ? camShownStats.sum[0] / camShownStats.frames : 0.0, camShownStats.stepSd(0),
+                camShownStats.maxAbs[0], camShownStats.dMaxAbs[0], -turnLogDeg, (windowS > 0.0) ? -turnLogDeg / windowS : 0.0);
+        }
+
+        camShownStats.clearWindow();
+        turnLogDeg = 0.0f;
+
+        camRawStats.clearWindow();
+        camOutStats.clearWindow();
+        camWindowCuts = 0;
+        camMatchPos = camMatchDeg = 0.0;
+    }
+
+    // Diagnostic (diag_camera_seconds): camera motion in stereo play without a wearer.
+    void diagCamera(InputResult &input, const dk64vr_game_state &state) {
+        const double every = setting("diag_camera_seconds");
+        if ((every <= 0.0) || !stereoLatched || cinemaActive || (state.scene != DK64VR_SCENE_GAMEPLAY)) {
+            return;
+        }
+
+        if (diagCameraStartS == 0.0) {
+            diagCameraStartS = displayS;
+        }
+
+        const double t = displayS - diagCameraStartS;
+        const int phase = int(t / every) % 4;
+        const double into = std::fmod(t, every);
+        if (phase != diagCameraPhase) {
+            diagCameraPhase = phase;
+            static const char *names[] = { "C-left", "C-right", "stick forward-right", "idle" };
+            dk64vr_logpf("[vr-cam]", "diag: %s", names[phase]);
+        }
+
+        if ((phase == 0) && (into < 0.15)) {
+            input.buttons |= n64::CLeft;
+        }
+        else if ((phase == 1) && (into < 0.15)) {
+            input.buttons |= n64::CRight;
+        }
+        else if (phase == 2) {
+            input.stickX = 0.8f;
+            input.stickY = 0.6f;
         }
     }
 
@@ -1718,7 +2033,7 @@ private:
             }
         }
 
-        return quatYaw(headInOriginQ) + turnDelta;  // plus what the game camera has still to turn
+        return quatYaw(headInOriginQ) + turnShownDelta;  // plus the turn the view shows ahead of the game camera
     }
 
     void updateInput(bool renderingNow) {
@@ -1731,10 +2046,31 @@ private:
         context.menuOpen = uiCapturing;
         // Turning and view-relative movement in third-person play only (first person turns with
         // the head and the game's own aim).
-        context.stereoPlay = stereoLatched && !cinemaActive && (state.scene == DK64VR_SCENE_GAMEPLAY);
+        context.stereoPlay = stereoLatched && !frozen && !cinemaActive && (state.scene == DK64VR_SCENE_GAMEPLAY);
         context.viewYawRad = moveYawRad();
         const float dt = float(std::min(periodS, 0.1));
-        const InputResult r = mapper.update(s, inputConfig(), context, displayS, dt);
+        InputResult r = mapper.update(s, inputConfig(), context, displayS, dt);
+        // Diagnostic: right stick X held at diag_turn_stick for 4 s, released for 4 s, in
+        // stereo play, as the mapper would turn with it (snap: one step a hold).
+        const double turnStick = setting("diag_turn_stick");
+        if ((turnStick != 0.0) && context.stereoPlay && (setting("right_stick_x") == 0.0)) {
+            if (diagTurnStartS == 0.0) {
+                diagTurnStartS = displayS;
+            }
+
+            const bool held = std::fmod(displayS - diagTurnStartS, 8.0) < 4.0;
+            if (held != diagTurnHeld) {
+                diagTurnHeld = held;
+                dk64vr_logpf("[vr-cam]", "diag: right stick %s", held ? "held" : "released");
+                if (held && (TurnMode(int(setting("turn_mode"))) == TurnMode::Snap)) {
+                    r.turnDeg += float(setting("snap_angle")) * ((turnStick > 0.0) ? 1.0f : -1.0f);
+                }
+            }
+
+            if (held && (TurnMode(int(setting("turn_mode"))) == TurnMode::Smooth)) {
+                r.turnDeg += smoothTurnRate(float(turnStick), float(setting("smooth_turn_speed"))) * dt;
+            }
+        }
         if (s.valid && !inputLogged) {
             inputLogged = true;
             dk64vr_logf("input: first live sample (right_stick_x %s, turn_mode %d, snap %d, move_from_view %d)",
@@ -1806,6 +2142,8 @@ private:
 
                 latestInput.buttons |= n64::Start;
             }
+
+            diagCamera(latestInput, state);
         }
 
         // Action-state log for unattended runs (no wearer can press anything; the log shows the
@@ -1817,14 +2155,60 @@ private:
         }
     }
 
+    // Once a display frame, from the (smoothed) game view: the game camera's unwrapped heading
+    // and the orbit the view needs (turnShownDelta).
+    void updateTurn(const Mat4 &gameView) {
+        const float raw = viewHeading(gameView);
+        headingUnwrapped = headingValid ? (headingUnwrapped + wrapAngle(raw - headingRaw)) : raw;
+        headingRaw = raw;
+        headingValid = true;
+        const dk64vr_game_state state = gameState();
+        if (turnActive) {
+            const float delta = turnTarget - headingUnwrapped;
+            turnDelta = delta;
+            turnShownDelta = delta;
+            // Done when the game camera arrives. Given up when it takes too long after the last
+            // turn input, when the game turns it (C-left/C-right), or outside play; the rest of
+            // the offset then unwinds over 0.4 s instead of jumping.
+            const bool settled = std::fabs(delta) < 0.004f;
+            const bool timedOut = (displayS - turnStartS) > 8.0;
+            const bool overtaken = (latestInput.buttons & (n64::CLeft | n64::CRight)) != 0;
+            const bool leftPlay = (state.scene != DK64VR_SCENE_GAMEPLAY) || frozen;
+            if (settled || timedOut || overtaken || leftPlay) {
+                dk64vr_logf("turn: game camera %s after %.2f s (%.1f deg left)", settled ? "arrived" : (timedOut ? "timed out" : (overtaken ? "turned by the game" : "left play")),
+                    displayS - turnStartS, delta * 180.0f / 3.1415926f);
+                turnActive = false;
+                turnDelta = 0.0f;
+                turnReleaseFrom = (settled || leftPlay) ? 0.0f : delta;
+                turnReleaseS = displayS;
+                turnShownDelta = turnReleaseFrom;
+            }
+        }
+        else if (turnReleaseFrom != 0.0f) {
+            const float t = float(std::clamp((displayS - turnReleaseS) / 0.4, 0.0, 1.0));
+            turnShownDelta = turnReleaseFrom * (1.0f - t * t * (3.0f - 2.0f * t));
+            if (t >= 1.0f) {
+                turnReleaseFrom = 0.0f;
+                turnShownDelta = 0.0f;
+            }
+        }
+        else {
+            turnShownDelta = 0.0f;
+        }
+    }
+
     void applyTurn(float deg) {
         // Rotates the game camera's heading (the camera patch takes it through recomp_vr_take_turn,
-        // dk64vr_control.h) by the step; the eye camera follows
-        // the game camera, so the world turns about Donkey Kong with no smooth swing.
-        // The view shows the new heading at once (orbitView); the game camera eases after it.
-        const dk64vr_game_state state = gameState();
-        const float headingNow = std::atan2(-(state.cam_at[0] - state.cam_eye[0]), -(state.cam_at[2] - state.cam_eye[2]));
-        turnTarget = (turnActive ? turnTarget : headingNow) - deg * 3.1415926f / 180.0f;
+        // dk64vr_control.h) by the step; the eye camera follows the game camera, so the world
+        // turns about Donkey Kong. The view shows the new heading at once (updateTurn); the game
+        // camera eases after it. Smooth turning calls this every frame with a small step.
+        if (!turnActive) {
+            // From the heading shown now (including any offset still unwinding).
+            turnTarget = (headingValid ? headingUnwrapped : 0.0f) + turnShownDelta;
+            turnReleaseFrom = 0.0f;
+        }
+
+        turnTarget -= deg * 3.1415926f / 180.0f;
         turnActive = true;
         turnStartS = displayS;
 
@@ -1835,6 +2219,7 @@ private:
             dk64vr_request_turn(whole);
         }
 
+        turnLogDeg += deg;
         if (std::fabs(deg) >= 5.0f) {
             dk64vr_logf("turn: %.0f deg", deg);
             blinkUntilS = displayS + setting("snap_blink");
@@ -2018,8 +2403,10 @@ private:
 
 
     // The static UI image (one 128x64 sRGB image, filled once; lesson 38): the pointer's dot
-    // (x 0-63), the beam's cross-section (x 64-95) and opaque black (x 96-127, the snap blink).
+    // (x 0-63), the beam's cross-section (x 64-95) and black (x 96-127) in FadeLevels bands of 4
+    // rows, alpha 0 to 1 (the snap blink, the transition fade and the pause dim).
     static const uint32_t UiWidth = 128, UiHeight = 64;
+    static const int FadeLevels = 16;
 
     void createUiImage() {
         if (!frameWorker) {
@@ -2062,7 +2449,7 @@ private:
             }
 
             for (uint32_t x = 96; x < 128; x++) {
-                put(x, y, 0, 0, 0, 1.0f);
+                put(x, y, 0, 0, 0, float(y / 4) / float(FadeLevels - 1));
             }
         }
 
@@ -2131,14 +2518,16 @@ private:
         return quad;
     }
 
-    XrCompositionLayerQuad uiQuad(XrSpace space, const Pose &pose, int32_t x, int32_t width, float sizeX, float sizeY) const {
+    // fadeLevel >= 0 selects one band of the black column (2 rows in its middle, so filtering never
+    // reaches a neighbour); -1 the whole height.
+    XrCompositionLayerQuad uiQuad(XrSpace space, const Pose &pose, int32_t x, int32_t width, float sizeX, float sizeY, int fadeLevel = -1) const {
         XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
         quad.space = space;
         quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         quad.subImage.swapchain = uiChain.handle;
-        quad.subImage.imageRect.offset = { x, 0 };
-        quad.subImage.imageRect.extent = { width, int32_t(UiHeight) };
+        quad.subImage.imageRect.offset = { x, (fadeLevel >= 0) ? (fadeLevel * 4 + 1) : 0 };
+        quad.subImage.imageRect.extent = { width, (fadeLevel >= 0) ? 2 : int32_t(UiHeight) };
         quad.pose = toXr(pose);
         quad.size = { sizeX, sizeY };
         return quad;
@@ -2379,6 +2768,8 @@ private:
     bool foveatedEye[2] = {};
     bool foveationDumped[2] = {};
     int gazeState = -1;
+    uint64_t gazeSwitches = 0;
+    uint32_t gazeSwitchesWindow = 0;
     uint64_t perfWindowFoveatedPasses = 0;
     bool runtimeEyesValid = false;
     Pose runtimeEyePose[2];
@@ -2475,6 +2866,20 @@ private:
     float diagYawDeg = 0.0f;
 
     TickScheduler scheduler;
+    CameraSmoother camSmoother;
+    CameraStepStats camRawStats, camOutStats, camShownStats;  // shown: after the turn orbit
+    double diagTurnStartS = 0.0;
+    uint64_t shownStatsFrame = UINT64_MAX;
+    bool diagTurnHeld = false;
+    Mat4 camCorrection;
+    uint64_t camCorrectionFrame = UINT64_MAX;
+    double camLastSampleS = 0.0;
+    int32_t camTickScene = DK64VR_SCENE_UNKNOWN;
+    uint32_t camWindowCuts = 0;
+    double camMatchPos = 0.0, camMatchDeg = 0.0;
+    CameraSmoothing camLevelLogged = CameraSmoothing(-1);
+    double diagCameraStartS = 0.0;
+    int diagCameraPhase = -1;
     RT64::VrWorkloadInfo lastInfo;
     bool cameraSeen = false;
     bool cameraLogged = false;
@@ -2516,6 +2921,13 @@ private:
     bool uiMouse = false;
     double uiRequestUntilS = 0.0;
     bool panelShownLast = false;
+    bool frozen = false;          // transitions and pause: the last stereo images held
+    bool pausePanel = false;      // the pause menu's panel over the frozen world
+    bool menuPanel = false;       // a recomp menu's panel over the frozen world
+    uint32_t freezeLiveCount = 0, pauseCount = 0;
+    bool haveFrozenViews = false;
+    XrCompositionLayerProjectionView frozenViews[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
+    float fadeAlpha = 0.0f, fadeTarget = 0.0f;
     bool cinemaActive = false;
     bool cinemaAnchored = false;
     float cinemaLoggedTop = -1.0f, cinemaLoggedViewport = -1.0f;
@@ -2527,8 +2939,15 @@ private:
     Quat headInOriginQ;
     float turnRemainder = 0.0f;
     bool turnActive = false;
-    float turnTarget = 0.0f;
-    float turnDelta = 0.0f;
+    float turnTarget = 0.0f;          // unwrapped heading the view shows while turning
+    float turnDelta = 0.0f;           // what the game camera still has to turn
+    float turnShownDelta = 0.0f;      // the orbit applied this frame
+    float turnReleaseFrom = 0.0f;     // an abandoned turn's offset, unwinding
+    double turnReleaseS = 0.0;
+    uint64_t turnFrame = UINT64_MAX;
+    bool headingValid = false;
+    float headingRaw = 0.0f, headingUnwrapped = 0.0f;
+    float turnLogDeg = 0.0f;          // smooth turning: degrees requested in the [vr-cam] window
     double turnStartS = 0.0;
     float shownHeading = 0.0f;
     double blinkUntilS = 0.0;
@@ -2569,6 +2988,10 @@ bool hostInstall(const std::filesystem::path &appFolder) {
     }
 
     return true;
+}
+
+bool hostActive() {
+    return host != nullptr;
 }
 
 void hostShutdown() {

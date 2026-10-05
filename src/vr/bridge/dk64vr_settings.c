@@ -11,11 +11,15 @@
 static const char *const right_stick_values[] = { "turn", "camera", NULL };
 static const char *const cutscene_values[] = { "cinema", "immersive", "panel", NULL };
 static const char *const foveation_values[] = { "off", "low", "medium", "high", NULL };
+static const char *const camera_smoothing_values[] = { "off", "low", "medium", "high", NULL };
 
 // Keys that only this port has. The standard keys live in the sfvr registry.
 static const sfvr_setting_key port_keys[] = {
-	{ "foveation", SFVR_SETTING_ENUM, 0.0, 0.0, 3.0, foveation_values },
-	{ "foveation_eye_tracked", SFVR_SETTING_BOOL, 0.0, 0.0, 1.0, NULL },
+	// Eye foveation (docs/VR_ARCHITECTURE.md 5b): high since schema 5, eye-tracked where gaze is
+	// valid (the fixed projection centre otherwise). Worn: fixed high looked good and tracked high
+	// invisible; at 120 Hz / 2160 it holds 120 fps (3.3 ms of GPU) where off drops to 97-105.
+	{ "foveation", SFVR_SETTING_ENUM, 3.0, 0.0, 3.0, foveation_values },
+	{ "foveation_eye_tracked", SFVR_SETTING_BOOL, 1.0, 0.0, 1.0, NULL },
 	// Dump the actual shading-rate attachment with the eye dumps (or once if dump_frame=0).
 	{ "dump_foveation", SFVR_SETTING_BOOL, 0.0, 0.0, 1.0, NULL },
 	// Game units per metre. Donkey Kong's model spans 25.2 units ([vr] player extent, DK Isles),
@@ -24,8 +28,17 @@ static const sfvr_setting_key port_keys[] = {
 	// Schema of this port's keys (migrations in dk64vr_settings_parse): 2 moved world_scale 25 -> 15, resolution_scale 1.25 -> 1.0
 	// refresh_rate 120 -> 72 and hud_distance 2 -> 1.5 (files still holding the old defaults are migrated once).
 	// 3 turned snap_blink 0.15 -> 0. 4 moved resolution_scale 1.0 -> 1.25 (2160 an eye) after the
-	// performance work.
-	{ "port_schema", SFVR_SETTING_INT, 4.0, 0.0, 100.0, NULL },
+	// performance work. 5 moved resolution_scale 1.25 -> auto (an absolute 2160 an eye, whatever
+	// the runtime recommends), foveation off -> high, foveation_eye_tracked false -> true and
+	// snap_angle 30 -> 45, and
+	// added camera_smoothing.
+	{ "port_schema", SFVR_SETTING_INT, 5.0, 0.0, 100.0, NULL },
+	// The game camera is the head origin, so its 30 Hz steps and sudden swings are felt directly.
+	// off: RT64's linear interpolation between game frames. low: a quadratic B-spline through the
+	// last three game frames (half a game frame later; velocity continuous). medium and high add
+	// a critically damped follower on the camera's orientation (0.06 s and 0.12 s). Hard cuts
+	// reset it; first person and the cinema are never smoothed. docs/VR_ARCHITECTURE.md 5c.
+	{ "camera_smoothing", SFVR_SETTING_ENUM, 2.0, 0.0, 3.0, camera_smoothing_values },
 	// Right stick X: a comfort turn (turn_mode, snap_angle: turns the game camera's heading at
 	// once) or the game's own C-left/C-right camera swing.
 	{ "right_stick_x", SFVR_SETTING_ENUM, 0.0, 0.0, 1.0, right_stick_values },
@@ -78,7 +91,16 @@ static const sfvr_setting_key port_keys[] = {
 	// heading logged for the frames after it (settle time and direction). 0 = off.
 	{ "diag_snap_seconds", SFVR_SETTING_FLOAT, 0.0, 0.0, 600.0, NULL },
 	// Diagnostic: dump the flat panel's image (vr-panel-*.png) every Nth present, up to 40. 0 = off.
-	{ "dump_panel_frame", SFVR_SETTING_INT, 0.0, 0.0, 1000000.0, NULL }
+	{ "dump_panel_frame", SFVR_SETTING_INT, 0.0, 0.0, 1000000.0, NULL },
+	// Diagnostic: camera motion without a wearer, in stereo play, in phases of N seconds:
+	// C-left tapped, C-right tapped, the stick held forward-right (Donkey Kong runs in a curve and
+	// the camera follows), nothing. 0 = off.
+	{ "diag_camera_seconds", SFVR_SETTING_FLOAT, 0.0, 0.0, 600.0, NULL },
+	// Diagnostic: a [vr-cam] line every display frame with the linear and the smoothed camera.
+	{ "diag_camera_log", SFVR_SETTING_BOOL, 0.0, 0.0, 1.0, NULL },
+	// Diagnostic: right stick X held at this deflection for 4 s, released for 4 s, in stereo
+	// play (a snap per hold, or the smooth orbit). 0 = off.
+	{ "diag_turn_stick", SFVR_SETTING_FLOAT, 0.0, -1.0, 1.0, NULL }
 };
 #define PORT_KEY_COUNT (sizeof(port_keys) / sizeof(port_keys[0]))
 
@@ -86,13 +108,18 @@ static const sfvr_setting_key port_keys[] = {
 
 // Standard keys whose default this port sets differently from the sfvr registry: the
 // display target of standard.md section 9 (120 Hz, about 2160 px an eye).
-// resolution_scale 1.25 (2160 an eye): the eye passes take about 6.4 ms of GPU a frame there
-// and hold 72 Hz with no missed frames (docs/VR_ARCHITECTURE.md section 5b). refresh_rate 72:
+// resolution_scale auto (DK64VR_RESOLUTION_AUTO): an absolute eye size of about 2160 px, the
+// standard's reference, whatever the runtime recommends (SteamVR's per-app resolution changes the
+// recommendation: 1728 by default, 2160 when the user set it, and 1.25 x 2160 = 2700 halved the
+// frame rate). A number still multiplies the recommendation. refresh_rate 72:
 // the only rate measured so far; the Frame takes the per-app rate anyway (standard.md section 9). The HUD sits nearer than the standard's 2 m default,
 // in front of anything it overlaps (lesson 2).
 static const struct { const char *name; double def; } port_defaults[] = {
 	{ "refresh_rate", 72.0 },
-	{ "resolution_scale", 1.25 },
+	{ "resolution_scale", DK64VR_RESOLUTION_AUTO },
+	// Right-stick snap turns of 45 degrees (the user, 2026-10-06: 30 felt like the N64's small
+	// camera steps); turn_mode smooth orbits the camera about Donkey Kong instead.
+	{ "snap_angle", 45.0 },
 	{ "hud_distance", 1.5 },
 };
 #define PORT_DEFAULT_COUNT (sizeof(port_defaults) / sizeof(port_defaults[0]))
@@ -243,6 +270,11 @@ static int classify_line(const char *s, size_t len, kv_t *kv) {
 	return LINE_KEY;
 }
 
+// resolution_scale also takes "auto" (DK64VR_RESOLUTION_AUTO), outside its numeric range.
+static bool is_auto_key(const sfvr_setting_key *k) {
+	return k && strcmp(k->name, "resolution_scale") == 0;
+}
+
 static bool same_value(double a, double b) {
 	// Floats go through the registry's float clamp: 0.35 reads back as 0.3499999
 	return fabs(a - b) <= 1e-6 * fmax(1.0, fabs(a));
@@ -263,6 +295,23 @@ static bool value_parse(const sfvr_setting_key *k, const char *val, size_t len, 
 	}
 	memcpy(buf, val, len);
 	buf[len] = '\0';
+
+	if (is_auto_key(k)) {
+		const char *a = buf;
+		while (is_space(*a)) {
+			a++;
+		}
+		if (tolower((unsigned char)a[0]) == 'a' && tolower((unsigned char)a[1]) == 'u' && tolower((unsigned char)a[2]) == 't' && tolower((unsigned char)a[3]) == 'o') {
+			bool rest = false;
+			for (const char *r = a + 4; *r; r++) {
+				rest = rest || !is_space(*r);
+			}
+			if (!rest) {
+				*out = DK64VR_RESOLUTION_AUTO;
+				return true;
+			}
+		}
+	}
 
 	if (k->type == SFVR_SETTING_BOOL) {
 		int b = sfvr_settings_parse_bool(buf, -1);
@@ -327,6 +376,9 @@ static bool value_parse(const sfvr_setting_key *k, const char *val, size_t len, 
 }
 
 static int value_render(const sfvr_setting_key *k, double v, char *out, size_t n) {
+	if (is_auto_key(k) && v == DK64VR_RESOLUTION_AUTO) {
+		return snprintf(out, n, "\"auto\"");
+	}
 	switch (k->type) {
 		case SFVR_SETTING_BOOL:
 			return snprintf(out, n, "%s", v != 0 ? "true" : "false");
@@ -465,7 +517,7 @@ int dk64vr_settings_parse(dk64vr_settings_t *s, const char *text, size_t len) {
 	// Port schema migration (lesson 79): a file written before schema 2 that still holds an old
 	// default takes the new one; a value the user chose stays.
 	int schema_index = dk64vr_settings_index("port_schema");
-	if (len > 0 && schema_index >= 0 && (!p.seen[schema_index] || s->file_values[schema_index] < 4.0)) {
+	if (len > 0 && schema_index >= 0 && (!p.seen[schema_index] || s->file_values[schema_index] < 5.0)) {
 		const double from_schema = p.seen[schema_index] ? s->file_values[schema_index] : 1.0;
 		static const struct { const char *name; double from; double to; double schema; } moved[] = {
 			{ "world_scale", 25.0, 15.0, 2.0 },
@@ -474,15 +526,24 @@ int dk64vr_settings_parse(dk64vr_settings_t *s, const char *text, size_t len) {
 			{ "hud_distance", 2.0, 1.5, 2.0 },
 			{ "snap_blink", 0.15, 0.0, 3.0 },
 			{ "resolution_scale", 1.0, 1.25, 4.0 },
+			{ "resolution_scale", 1.25, DK64VR_RESOLUTION_AUTO, 5.0 },
+			{ "foveation", 0.0, 3.0, 5.0 },
+			{ "foveation_eye_tracked", 0.0, 1.0, 5.0 },
+			{ "snap_angle", 30.0, 45.0, 5.0 },
 		};
 		for (size_t m = 0; m < sizeof(moved) / sizeof(moved[0]); m++) {
 			int index = dk64vr_settings_index(moved[m].name);
 			if (index >= 0 && p.seen[index] && from_schema < moved[m].schema && fabs(s->file_values[index] - moved[m].from) < 1e-6) {
 				s->file_values[index] = moved[m].to;
-				dk64vr_logf("settings: %s %g -> %g (new default)", moved[m].name, moved[m].from, moved[m].to);
+				if (moved[m].to == DK64VR_RESOLUTION_AUTO && strcmp(moved[m].name, "resolution_scale") == 0) {
+					dk64vr_logf("settings: %s %g -> auto (new default)", moved[m].name, moved[m].from);
+				}
+				else {
+					dk64vr_logf("settings: %s %g -> %g (new default)", moved[m].name, moved[m].from, moved[m].to);
+				}
 			}
 		}
-		s->file_values[schema_index] = 4.0;
+		s->file_values[schema_index] = 5.0;
 		p.repairs++;
 	}
 	if (s->file_version < SFVR_SETTINGS_SCHEMA) {
@@ -796,7 +857,7 @@ void dk64vr_settings_set(dk64vr_settings_t *s, const char *name, double value) {
 	else if (k->type == SFVR_SETTING_BOOL) {
 		value = value != 0;
 	}
-	else {
+	else if (!(is_auto_key(k) && value == DK64VR_RESOLUTION_AUTO)) {
 		value = sfvr_settings_clamp_float(k, (float)value);
 	}
 	s->values[index] = s->file_values[index] = value;

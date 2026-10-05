@@ -1,5 +1,6 @@
 #include "dk64vr_math.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace dk64vr {
@@ -183,6 +184,12 @@ Mat4 orbitView(const Mat4 &view, float targetHeadingRad, float pivotDistance, fl
     if (delta != nullptr) {
         *delta = d;
     }
+
+    return orbitViewBy(view, d, pivotDistance);
+}
+
+Mat4 orbitViewBy(const Mat4 &view, float d, float pivotDistance) {
+    const Mat4 cam = rigidInverse(view);
 
     // The pivot: pivotDistance ahead of the camera, horizontally.
     const float fx = -cam.m[2][0], fz = -cam.m[2][2];
@@ -438,6 +445,30 @@ FogRemap fogRemap(const Mat4 &gameProj, const Mat4 &eyeProj) {
 
     r.a = (g1 - g0) / (e1 - e0);
     r.b = g0 - r.a * e0;
+    return r;
+}
+
+EyeSize eyeSize(uint32_t recommendedWidth, uint32_t recommendedHeight, uint32_t maxWidth, uint32_t maxHeight, double resolutionScale, uint32_t target) {
+    EyeSize r;
+    const uint32_t longer = std::max(recommendedWidth, recommendedHeight);
+    if (resolutionScale > 0.0) {
+        r.scale = resolutionScale;
+    }
+    else {
+        r.scale = (longer > 0) ? std::max(1.0, double(target) / double(longer)) : 1.0;
+    }
+
+    auto size = [&](uint32_t recommended, uint32_t maximum) {
+        uint32_t v = uint32_t(std::lround(double(recommended) * r.scale));
+        if (maximum > 0) {
+            v = std::min(v, maximum);
+        }
+
+        v &= ~1U;
+        return std::max(v, 2U);
+    };
+    r.width = size(recommendedWidth, maxWidth);
+    r.height = size(recommendedHeight, maxHeight);
     return r;
 }
 
