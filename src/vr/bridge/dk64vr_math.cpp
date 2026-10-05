@@ -211,6 +211,58 @@ Mat4 orbitView(const Mat4 &view, float targetHeadingRad, float pivotDistance, fl
     return mul(mul(mul(toPivot, rot), back), view);
 }
 
+FovTangents screenFov(const Pose &screen, float width, float height, const Vec3 &eye) {
+    const Vec3 r = quatRotate(screen.q, Vec3 { 1.0f, 0.0f, 0.0f });
+    const Vec3 u = quatRotate(screen.q, Vec3 { 0.0f, 1.0f, 0.0f });
+    const Vec3 n = quatRotate(screen.q, Vec3 { 0.0f, 0.0f, 1.0f });
+    const Vec3 toCentre = { screen.p.x - eye.x, screen.p.y - eye.y, screen.p.z - eye.z };
+    const float d = std::fmax(1e-3f, -dot(toCentre, n));
+    const float cx = dot(toCentre, r), cy = dot(toCentre, u);
+    FovTangents t;
+    t.left = (cx - 0.5f * width) / d;
+    t.right = (cx + 0.5f * width) / d;
+    t.up = (cy + 0.5f * height) / d;
+    t.down = (cy - 0.5f * height) / d;
+    return t;
+}
+
+FovTangents gameFov(const Mat4 &gameProj) {
+    // guPerspective: [0][0] = s cot / aspect, [1][1] = s cot, [2][3] = -s.
+    const float s = -gameProj.m[2][3];
+    FovTangents t;
+    t.right = (std::fabs(gameProj.m[0][0]) > 1e-9f) ? (s / gameProj.m[0][0]) : 1.0f;
+    t.up = (std::fabs(gameProj.m[1][1]) > 1e-9f) ? (s / gameProj.m[1][1]) : 1.0f;
+    t.left = -t.right;
+    t.down = -t.up;
+    return t;
+}
+
+float cinemaSeparation(float infinityMetres, float screenWidth, const FovTangents &gameTan, float convergence) {
+    return (screenWidth > 1e-6f) ? (infinityMetres * (gameTan.right - gameTan.left) * convergence / screenWidth) : 0.0f;
+}
+
+CinemaEye cinemaEye(const Mat4 &gameView, const FovTangents &gameTan, float separation, float convergence, int eye) {
+    const float h = ((eye == 0) ? -0.5f : 0.5f) * separation;
+    CinemaEye out;
+    Mat4 shift;
+    shift.m[3][0] = -h;  // camera space as the eye sees it: x - h
+    out.view = mul(gameView, shift);
+    const float k = (convergence > 1e-6f) ? (h / convergence) : 0.0f;
+    out.tan = gameTan;
+    out.tan.left -= k;
+    out.tan.right -= k;
+    return out;
+}
+
+void hudSolve(const float black[3], const float white[3], float colour[3], float &alpha) {
+    auto sat = [](float v) { return std::fmin(1.0f, std::fmax(0.0f, v)); };
+    const float diff = ((white[0] - black[0]) + (white[1] - black[1]) + (white[2] - black[2])) / 3.0f;
+    alpha = sat(1.0f - diff);
+    for (int i = 0; i < 3; i++) {
+        colour[i] = (alpha > (1.0f / 255.0f)) ? sat(black[i] / alpha) : 0.0f;
+    }
+}
+
 Pose noRollPose(const Quat &head, const Vec3 &headPos, float distance) {
     const Vec3 f = quatRotate(head, Vec3 { 0.0f, 0.0f, -1.0f });
     const float yaw = std::atan2(-f.x, -f.z);

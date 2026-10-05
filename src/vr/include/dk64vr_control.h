@@ -25,6 +25,11 @@ int dk64vr_is_paused(void);
 void dk64vr_request_turn(int degrees);
 int dk64vr_take_turn(void);
 
+// Diagnostic (diag_hud_seconds): ask the game to show its HUD counters once, through its own
+// "show this counter" function, so an unattended run can dump the HUD. Taken by vr_frame_hook.
+void dk64vr_request_hud_diag(void);
+int dk64vr_take_hud_diag(void);
+
 #ifdef __cplusplus
 }
 #endif

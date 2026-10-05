@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Rebuild what SteamVR composites for one eye from an unattended run's dumps (needs numpy and
+Pillow). The game logs every layer's geometry (`[vr] layers: ...`, xr_host.cpp logLayers) with
+each eye dump and every 2 s while panel dumps run; this draws, for one eye and in submission
+order, the projection layer (an eye dump), the panel quad (a panel dump), the HUD quad (a HUD
+dump, unpremultiplied alpha) and the pointer's beam and dot (the static UI image, rebuilt here
+exactly as createUiImage makes it). It is a reconstruction for checking layer placement, order
+and alpha, not a capture of the compositor.
+
+  composite.py RUN_DIR --layers N --eye 0|1 [--eye-image F] [--panel F] [--hud F] [--out F]
+
+N picks the N-th logged layers line (negative counts from the end). Images default to none
+(the layer is then drawn in a flat colour so its placement still shows).
+"""
+import argparse
+import math
+import re
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+
+def qrot(q, v):
+    x, y, z, w = q
+    u = np.array([x, y, z])
+    v = np.asarray(v, dtype=np.float64)
+    t = 2.0 * np.cross(u, v)
+    return v + w * t + np.cross(u, t)
+
+
+def qconj(q):
+    return (-q[0], -q[1], -q[2], q[3])
+
+
+def parse_layers(log, index):
+    lines = [l for l in Path(log).read_text(errors="replace").splitlines() if l.startswith("[vr] layers:")]
+    if not lines:
+        raise SystemExit("no layers lines in the log")
+    line = lines[index]
+    out = []
+    for part in line.split("|")[1:]:
+        f = part.split()
+        name = f[0]
+        nums = [float(x) for x in re.findall(r"-?\d+\.?\d*(?:e-?\d+)?", part[len(name) + 1:])]
+        if name.startswith("proj"):
+            p, q, fov, rect = nums[0:3], nums[3:7], nums[7:11], nums[11:15]
+            out.append(dict(kind="proj", eye=int(name[4]), p=p, q=q, fov=fov, rect=rect))
+        else:
+            p, q, size, rect = nums[0:3], nums[3:7], nums[7:9], nums[9:13]
+            out.append(dict(kind="quad", name=name, p=p, q=q, size=size, rect=rect))
+    return line, out
+
+
+def ui_image():
+    img = np.zeros((64, 128, 4), dtype=np.float64)
+    for y in range(64):
+        for x in range(64):
+            dx, dy = x + 0.5 - 32, y + 0.5 - 32
+            r = math.hypot(dx, dy)
+            if r < 22:
+                img[y, x] = [235, 250, 255, 255 * min(1.0, 22 - r)]
+            else:
+                img[y, x] = [20, 30, 40, 255 * max(0.0, min(1.0, 31 - r)) * 0.85]
+        for x in range(64, 96):
+            u = (x - 64 + 0.5) / 32
+            a = max(0.0, 1 - abs(u - 0.5) * 2)
+            img[y, x] = [200, 235, 255, 255 * a * a * 0.9]
+        img[y, 96:128] = [0, 0, 0, 255]
+    return img / 255.0
+
+
+def load(path):
+    return np.asarray(Image.open(path).convert("RGBA"), dtype=np.float64) / 255.0
+
+
+def sample(img, rect, u, v):
+    """img HxWx4, rect = x y w h in pixels, u/v in 0..1 (v down)."""
+    x0, y0, w, h = rect
+    xs = np.clip((x0 + u * w).astype(int), 0, img.shape[1] - 1)
+    ys = np.clip((y0 + v * h).astype(int), 0, img.shape[0] - 1)
+    return img[ys, xs]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("run")
+    ap.add_argument("--layers", type=int, default=-1)
+    ap.add_argument("--eye", type=int, default=0)
+    ap.add_argument("--eye-image")
+    ap.add_argument("--panel")
+    ap.add_argument("--hud")
+    ap.add_argument("--out", default="composite.png")
+    ap.add_argument("--size", type=int, default=900)
+    ap.add_argument("--tan", type=float, default=1.1, help="half-extent of the output view, as a tangent")
+    a = ap.parse_args()
+
+    line, layers = parse_layers(Path(a.run) / "run-stdout.txt", a.layers)
+    proj = [l for l in layers if l["kind"] == "proj" and l["eye"] == a.eye][0]
+    eye_pos = np.array(proj["p"])
+    view_q = tuple(proj["q"])
+
+    n = a.size
+    t = np.linspace(-a.tan, a.tan, n)
+    tx, ty = np.meshgrid(t, -t)
+    dirs_view = np.stack([tx, ty, -np.ones_like(tx)], axis=-1)
+    dirs = np.apply_along_axis(lambda d: qrot(view_q, d), -1, dirs_view.reshape(-1, 3)).reshape(n, n, 3)
+    out = np.zeros((n, n, 3))
+
+    # The projection layer: the eye image through the view's own FOV.
+    eye_img = load(a.eye_image) if a.eye_image else None
+    l, r, u, d = proj["fov"]
+    loc = np.apply_along_axis(lambda v: qrot(qconj(view_q), v), -1, dirs.reshape(-1, 3)).reshape(n, n, 3)
+    fx, fy = loc[..., 0] / -loc[..., 2], loc[..., 1] / -loc[..., 2]
+    tl, tr, tu, td = math.tan(l), math.tan(r), math.tan(u), math.tan(d)
+    inside = (loc[..., 2] < 0) & (fx >= tl) & (fx <= tr) & (fy <= tu) & (fy >= td)
+    uu, vv = (fx - tl) / (tr - tl), (tu - fy) / (tu - td)
+    if eye_img is not None:
+        out[inside] = sample(eye_img, proj["rect"], uu[inside], vv[inside])[:, :3]
+    else:
+        out[inside] = [0.2, 0.25, 0.3]
+
+    images = {"panel": load(a.panel) if a.panel else None, "hud": load(a.hud) if a.hud else None, "ui": ui_image()}
+    for q in [l for l in layers if l["kind"] == "quad" and not l["name"].endswith("@view")]:
+        qq = tuple(q["q"])
+        normal = qrot(qq, [0, 0, 1])
+        centre = np.array(q["p"])
+        denom = dirs @ normal
+        dist = ((centre - eye_pos) @ normal) / np.where(np.abs(denom) < 1e-9, 1e-9, denom)
+        hit = eye_pos + dirs * dist[..., None]
+        rel = hit - centre
+        x = rel @ qrot(qq, [1, 0, 0])
+        y = rel @ qrot(qq, [0, 1, 0])
+        w, h = q["size"]
+        on = (dist > 0) & (np.abs(x) <= w / 2) & (np.abs(y) <= h / 2)
+        if not on.any():
+            continue
+        img = images.get(q["name"])
+        if img is None:
+            colour = {"panel": [0.9, 0.9, 0.9, 1.0], "hud": [1.0, 0.5, 0.0, 0.5]}.get(q["name"], [1, 1, 1, 1])
+            px = np.tile(colour, (on.sum(), 1))
+        else:
+            px = sample(img, q["rect"], x[on] / w + 0.5, 0.5 - y[on] / h)
+        alpha = px[:, 3:4] if q["name"] != "panel" else 1.0
+        out[on] = px[:, :3] * alpha + out[on] * (1 - alpha)
+
+    Image.fromarray((np.clip(out, 0, 1) * 255).astype(np.uint8)).save(a.out)
+    print(f"{a.out}: eye {a.eye}, {len(layers)} layer entries from: {line[:120]}...")
+
+
+if __name__ == "__main__":
+    main()

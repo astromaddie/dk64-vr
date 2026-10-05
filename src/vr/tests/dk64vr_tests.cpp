@@ -2,6 +2,7 @@
 // view, level pitch, the fog remap and the settings file. No window, GPU or runtime.
 //
 //   tools/docker/build-linux.sh vrtest     (or any C++17 compiler, see src/vr/tests/CMakeLists.txt)
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -811,6 +812,95 @@ static void testOrbitView() {
     CHECK_NEAR(wrapAngle(3.5f * 3.1415926f), -0.5f * 3.1415926f, 1e-4);
 }
 
+static void testHudSolve() {
+    // The N64 blender's usual 2D mode: out = a * src + (1 - a) * dst, in the targets' encoding.
+    // Rendered over black and over white and solved, every (src, a) comes back, in 8-bit steps.
+    auto q = [](float v) { return std::round(v * 255.0f) / 255.0f; };
+    int worst = 0;
+    for (int ai = 0; ai <= 255; ai += 5) {
+        const float a = ai / 255.0f;
+        const float srcs[][3] = { { 1, 1, 1 }, { 0, 0, 0 }, { 0.9f, 0.6f, 0.1f }, { 0.2f, 0.3f, 0.95f } };
+        for (const auto &src : srcs) {
+            float b[3], w[3], c[3], alpha;
+            for (int i = 0; i < 3; i++) {
+                b[i] = q(a * src[i]);
+                w[i] = q(a * src[i] + (1.0f - a));
+            }
+            hudSolve(b, w, c, alpha);
+            CHECK_NEAR(alpha, a, 1.5 / 255.0);
+            // Composited over any background the solved pixel matches the game's own blend.
+            const float bg[3] = { 0.3f, 0.7f, 0.5f };
+            for (int i = 0; i < 3; i++) {
+                const float game = a * src[i] + (1.0f - a) * bg[i];
+                const float ours = alpha * c[i] + (1.0f - alpha) * bg[i];
+                const int err = int(std::lround(std::fabs(game - ours) * 255.0f));
+                worst = std::max(worst, err);
+            }
+        }
+    }
+    CHECK(worst <= 2);
+    // Fully transparent: alpha 0, colour 0. Opaque black text outline: alpha 1, colour 0.
+    float c[3], alpha;
+    const float zero[3] = { 0, 0, 0 }, one[3] = { 1, 1, 1 };
+    hudSolve(zero, one, c, alpha);
+    CHECK(alpha == 0.0f && c[0] == 0.0f);
+    hudSolve(zero, zero, c, alpha);
+    CHECK(alpha == 1.0f && c[0] == 0.0f);
+}
+
+static void testCinema() {
+    // Screen 3 m ahead, 3.6 m wide, 2.7 m tall; an eye on its axis sees it symmetrically.
+    Pose screen;
+    screen.p = { 0.0f, 1.6f, -3.0f };
+    FovTangents t = screenFov(screen, 3.6f, 2.7f, { 0.0f, 1.6f, 0.0f });
+    CHECK_NEAR(t.left, -0.6, 1e-5);
+    CHECK_NEAR(t.right, 0.6, 1e-5);
+    CHECK_NEAR(t.up, 0.45, 1e-5);
+    CHECK_NEAR(t.down, -0.45, 1e-5);
+    // A left eye 32 mm left sees the screen shifted right; a turned screen still works.
+    t = screenFov(screen, 3.6f, 2.7f, { -0.032f, 1.6f, 0.0f });
+    CHECK_NEAR(t.left, (-1.8 + 0.032) / 3.0, 1e-5);
+    Pose turned;
+    turned.q = quatFromYaw(0.7f);
+    turned.p = quatRotate(turned.q, { 0.0f, 0.0f, -3.0f });
+    const FovTangents t2 = screenFov(turned, 3.6f, 2.7f, quatRotate(turned.q, { -0.032f, 0.0f, 0.0f }));
+    CHECK_NEAR(t2.left, t.left, 1e-5);
+    CHECK_NEAR(t2.up, 0.45, 1e-5);
+
+    // The game camera (fov 45, 4:3, near 10) split for the screen.
+    const Mat4 proj = guPerspective(45.0f, 4.0f / 3.0f, 10.0f, 6000.0f, 1.0f);
+    const FovTangents g = gameFov(proj);
+    CHECK_NEAR(g.up, std::tan(22.5 * 3.14159265 / 180.0), 1e-5);
+    CHECK_NEAR(g.right, g.up * 4.0 / 3.0, 1e-5);
+    const float near = 10.0f;
+    const float screenW = 3.6f, ipd = 0.064f;
+    const float sep = cinemaSeparation(0.6f * ipd, screenW, g, near);
+    const Mat4 view = guLookAt({ 100, 50, 300 }, { 120, 40, 0 }, { 0, 1, 0 });
+    const CinemaEye left = cinemaEye(view, g, sep, near, 0), right = cinemaEye(view, g, sep, near, 1);
+    // A point's on-screen position (metres from the left edge) for one eye.
+    auto onScreen = [&](const CinemaEye &e, const Vec3 &world) {
+        const Vec3 c = transformPoint(world, e.view);
+        const float tanX = c.x / -c.z;
+        return (tanX - e.tan.left) / (e.tan.right - e.tan.left) * screenW;
+    };
+    // At the convergence distance (the near plane) both eyes agree: zero parallax.
+    const Mat4 cam = rigidInverse(view);
+    auto ahead = [&](float d) {
+        return Vec3 { cam.m[3][0] - cam.m[2][0] * d, cam.m[3][1] - cam.m[2][1] * d, cam.m[3][2] - cam.m[2][2] * d };
+    };
+    CHECK_NEAR(onScreen(right, ahead(near)) - onScreen(left, ahead(near)), 0.0, 1e-5);
+    // Further away: positive (uncrossed) parallax, growing towards 0.6 x the eye distance.
+    const float p100 = onScreen(right, ahead(100.0f)) - onScreen(left, ahead(100.0f));
+    const float pFar = onScreen(right, ahead(1e7f)) - onScreen(left, ahead(1e7f));
+    CHECK(p100 > 0.0f);
+    CHECK(pFar > p100);
+    CHECK_NEAR(pFar, 0.6 * ipd, 1e-4);
+    CHECK(pFar < ipd);  // never divergent
+    // Zero depth setting: identical eyes.
+    const CinemaEye flat = cinemaEye(view, g, 0.0f, near, 1);
+    CHECK(matNear(flat.view, view, 1e-6f));
+}
+
 int main() {
     testEyeProjectionMatchesGuPerspective();
     testEyeProjectionAsymmetricEdges();
@@ -838,6 +928,8 @@ int main() {
     testMerge();
     testLayerPoses();
     testOrbitView();
+    testHudSolve();
+    testCinema();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

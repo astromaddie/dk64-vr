@@ -123,6 +123,7 @@ struct Readback {
     uint32_t height = 0;
     bool bgra = false;
     bool pending = false;
+    bool keepAlpha = false;
     std::string path;
 };
 
@@ -439,6 +440,11 @@ public:
 
     void workloadArrived(const RT64::VrWorkloadInfo &info) override {
         lastInfo = info;
+        if (info.hudCalls > 0) {
+            for (int i = 0; i < 7; i++) {
+                hudPartChanges[i] += (info.hudChangedParts >> i) & 1;
+            }
+        }
         const double tick = (info.viOriginalRate > 0) ? (1.0 / double(info.viOriginalRate)) : (1.0 / 30.0);
         const double at = (frameMode != RT64::VrFrame::Mode::None) ? displayS : monotonicSeconds();
         const double tickBefore = scheduler.tick_s;
@@ -512,6 +518,24 @@ public:
                 setting("world_scale"), int(setting("level_pitch")));
         }
 
+        if (cinemaActive) {
+            // The game camera as two eyes for the cinema screen (dk64vr_math.h, cinemaEye): the
+            // head does not move the picture, only the screen's layer views do.
+            const FovTangents gameTan = gameFov(gameProj);
+            const float nearZ = gameProj.m[3][2] / (gameProj.m[2][2] - (-gameProj.m[2][3]));
+            const Vec3 a = eyeInHead[0].p, b = eyeInHead[1].p;
+            const float ipd = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+            const float separation = cinemaSeparation(float(setting("cinema_depth")) * ipd, float(setting("cinema_width")), gameTan, std::fabs(nearZ));
+            const CinemaEye ce = cinemaEye(gameView, gameTan, separation, std::fabs(nearZ), int(eye));
+            fromMat4(ce.view, outView);
+            fromMat4(eyeProjection(ce.tan, gameProj), outProj);
+            if (eye == 0) {
+                cinemaGameTan = gameTan;
+            }
+
+            return;
+        }
+
         if (turnActive) {
             const dk64vr_game_state state = gameState();
             const float dx = state.cam_at[0] - state.cam_eye[0], dz = state.cam_at[2] - state.cam_eye[2];
@@ -572,6 +596,64 @@ public:
         eyesRecorded[eye] = true;
     }
 
+    plume::RenderFramebuffer *hudAcquire(uint32_t hudCalls, uint64_t hudSignature, uint32_t *width, uint32_t *height) override {
+        lastHudCalls = hudCalls;
+        hudGameFrames++;
+        if ((hudCalls == 0) || (setting("hud_visible") == 0.0) || (hudChain.handle == XR_NULL_HANDLE) || (frameMode != RT64::VrFrame::Mode::Stereo)) {
+            hudShown = false;
+            hudSignatureShown = 0;
+            return nullptr;
+        }
+
+        // The same HUD as the image already shown is not drawn again.
+        if (hudShown && (hudSignature == hudSignatureShown)) {
+            hudSkipsSame++;
+            return nullptr;
+        }
+
+        hudSignatureShown = hudSignature;
+        hudLastDrawnFrame = hudGameFrames;
+
+        if (!hudChain.acquired) {
+            if (XR_FAILED(acquireImage(hudChain))) {
+                logOnce(hudFailed, "HUD image acquire failed");
+                return nullptr;
+            }
+
+            hudChain.acquired = true;
+            plume::VulkanTexture *image = hudChain.textures[hudChain.index].get();
+            image->textureLayout = plume::RenderTextureLayout::COLOR_WRITE;
+            image->barrierStages = plume::RenderBarrierStage::GRAPHICS;
+        }
+
+        if (!hudLogged) {
+            hudLogged = true;
+            dk64vr_logf("HUD: first HUD image (%u calls), %ux%u", hudCalls, hudChain.width, hudChain.height);
+        }
+
+        *width = hudChain.width;
+        *height = hudChain.height;
+        return hudChain.framebuffers[hudChain.index].get();
+    }
+
+    void hudRecorded(double cpuMs, double gpuMs) override {
+        hudShown = true;
+        hudCpuSum += cpuMs;
+        hudGpuSum += gpuMs;
+        hudPasses++;
+        if (hudDumpDue && frameWorker) {
+            hudDumpDue = false;
+            plume::VulkanTexture *image = hudChain.textures[hudChain.index].get();
+            frameWorker->commandList->begin();
+            recordReadback(frameWorker->commandList.get(), image, hudChain, hudReadback, "vr-hud");
+            frameWorker->commandList->barriers(plume::RenderBarrierStage::GRAPHICS, plume::RenderTextureBarrier(image, plume::RenderTextureLayout::COLOR_WRITE));
+            frameWorker->commandList->end();
+            frameWorker->execute();
+            frameWorker->wait();
+            finishReadback(hudReadback);
+        }
+    }
+
     void eyeDone(uint32_t eye, double cpuMs, double gpuMs) override {
         if (eye < 2) {
             eyeCpuMs[eye] = cpuMs;
@@ -620,6 +702,25 @@ public:
             }
 
             releaseEyes();
+            const bool cinemaShown = stereoShown && cinemaActive;
+            if (cinemaShown && !cinemaAnchored) {
+                anchorCinema();
+            }
+
+            // The picture between the letterbox bars (the camera's scissor), a little inside so
+            // a bar's edge never shows.
+            // The camera's projection spans its viewport's rows (DK64 narrows both to the band in
+            // letterboxed scenes), so a frame row maps to a tangent through the viewport.
+            const float top = std::clamp(lastInfo.cameraTop, 0.0f, 0.45f);
+            const float bottom = std::clamp(lastInfo.cameraBottom, 0.55f, 1.0f);
+            const float vTop = lastInfo.viewportTop;
+            const float vSpan = std::max(0.1f, lastInfo.viewportBottom - lastInfo.viewportTop);
+            auto rowTan = [&](float row) { return cinemaGameTan.up - (row - vTop) / vSpan * 2.0f * cinemaGameTan.up; };
+            const float pictureUp = rowTan(top);
+            const float pictureDown = rowTan(bottom);
+            const float screenWidth = float(setting("cinema_width"));
+            const float unitsPerTan = screenWidth / std::max(1e-3f, cinemaGameTan.right - cinemaGameTan.left);
+            const float screenHeight = (pictureUp - pictureDown) * unitsPerTan;
             for (uint32_t eye = 0; eye < 2; eye++) {
                 views[eye].pose = toXr(eyeSubmitPose[eye]);
                 views[eye].fov = eyeXrFov[eye];
@@ -627,6 +728,39 @@ public:
                 views[eye].subImage.imageRect.offset = { 0, 0 };
                 views[eye].subImage.imageRect.extent = { int32_t(eyeChain[eye].width), int32_t(eyeChain[eye].height) };
                 views[eye].subImage.imageArrayIndex = 0;
+                if (cinemaShown) {
+                    Pose view;
+                    view.q = cinemaScreen.q;
+                    view.p = eyeSubmitPose[eye].p;
+                    const FovTangents t = screenFov(cinemaScreen, screenWidth, screenHeight, view.p);
+                    views[eye].pose = toXr(view);
+                    views[eye].fov = { std::atan(t.left), std::atan(t.right), std::atan(t.up), std::atan(t.down) };
+                    const int32_t h = int32_t(eyeChain[eye].height);
+                    const int32_t y0 = int32_t(std::lround(top * float(h))), y1 = int32_t(std::lround(bottom * float(h)));
+                    views[eye].subImage.imageRect.offset = { 0, y0 };
+                    views[eye].subImage.imageRect.extent = { int32_t(eyeChain[eye].width), std::max(1, y1 - y0) };
+                }
+            }
+
+            if (cinemaShown && ((lastInfo.cameraTop != cinemaLoggedTop) || (lastInfo.viewportTop != cinemaLoggedViewport))) {
+                cinemaLoggedTop = lastInfo.cameraTop;
+                cinemaLoggedViewport = lastInfo.viewportTop;
+                dk64vr_logf("cinema: picture rows %.3f-%.3f, viewport %.3f-%.3f, game tan %.3f x %.3f, screen %.2f x %.2f m",
+                    lastInfo.cameraTop, lastInfo.cameraBottom, lastInfo.viewportTop, lastInfo.viewportBottom, cinemaGameTan.right, cinemaGameTan.up, screenWidth, screenHeight);
+            }
+
+            if (cinemaShown) {
+                // The HUD (subtitles, text boxes) on the screen, 2 cm in front of the picture
+                // plane, covering the whole frame, so text in a letterbox bar sits under or
+                // above the picture (lesson 72).
+                cinemaHudPose = cinemaScreen;
+                const Vec3 n = quatRotate(cinemaScreen.q, Vec3 { 0.0f, 0.0f, 1.0f });
+                const Vec3 u = quatRotate(cinemaScreen.q, Vec3 { 0.0f, 1.0f, 0.0f });
+                const float frameUp = rowTan(0.0f), frameDown = rowTan(1.0f);
+                const float centreShift = (0.5f * (frameUp + frameDown) - 0.5f * (pictureUp + pictureDown)) * unitsPerTan;
+                cinemaHudPose.p = { cinemaScreen.p.x + 0.02f * n.x + centreShift * u.x, cinemaScreen.p.y + 0.02f * n.y + centreShift * u.y, cinemaScreen.p.z + 0.02f * n.z + centreShift * u.z };
+                cinemaHudSize[0] = screenWidth;
+                cinemaHudSize[1] = (frameUp - frameDown) * unitsPerTan;
             }
 
             projection.space = localSpace;
@@ -646,6 +780,12 @@ public:
                 quad.pose = toXr(panel);
                 quad.size = { width, width * float(panelChain.height) / float(panelChain.width) };
                 layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&quad));
+            }
+
+            // The HUD: a roll-free quad following the head (standard.md section 4), nearer than
+            // what it overlaps (lesson 2); in first person it marks the game camera's aim.
+            if (stereoShown && hudShown && hudReleasedOnce) {
+                extraQuads.push_back(hudQuad());
             }
 
             // The snap blink: opaque black in front of the eyes while the game camera settles on
@@ -695,8 +835,14 @@ public:
             char line[256];
             if (sfvr_perf_poll(&perf, nowS, line, sizeof(line))) {
                 const double windowS = nowS - perfWindowStartS;
-                printf("%s mode=%s rate=%.1fHz eye=%ux%u game=%.1fHz rebases=%" PRIu64 "\n", line, stereoShown ? "stereo" : "flat", (periodS > 0.0) ? (1.0 / periodS) : 0.0,
-                    eyeChain[0].width, eyeChain[0].height, (windowS > 0.0) ? double(scheduler.arrivals - perfWindowArrivals) / windowS : 0.0, scheduler.rebases - perfWindowRebases);
+                printf("%s mode=%s rate=%.1fHz eye=%ux%u game=%.1fHz rebases=%" PRIu64 " hud=%.2f/%.2fms x%u same=%u rate=%u changed=%u/%u/%u/%u/%u/%u/%u\n", line, stereoShown ? (cinemaActive ? "cinema" : "stereo") : "flat", (periodS > 0.0) ? (1.0 / periodS) : 0.0,
+                    eyeChain[0].width, eyeChain[0].height, (windowS > 0.0) ? double(scheduler.arrivals - perfWindowArrivals) / windowS : 0.0, scheduler.rebases - perfWindowRebases,
+                    hudPasses ? hudCpuSum / hudPasses : 0.0, hudPasses ? hudGpuSum / hudPasses : 0.0, hudPasses, hudSkipsSame, hudSkipsRate,
+                    hudPartChanges[0], hudPartChanges[1], hudPartChanges[2], hudPartChanges[3], hudPartChanges[4], hudPartChanges[5], hudPartChanges[6]);
+                std::fill(std::begin(hudPartChanges), std::end(hudPartChanges), 0u);
+                hudCpuSum = hudGpuSum = 0.0;
+                hudPasses = 0;
+                hudSkipsSame = hudSkipsRate = 0;
                 perfWindowStartS = nowS;
                 perfWindowArrivals = scheduler.arrivals;
                 perfWindowRebases = scheduler.rebases;
@@ -889,6 +1035,10 @@ private:
             for (int eye = 0; eye < 2; eye++) {
                 createSwapchain(eyeChain[eye], eyeSize[0], eyeSize[1], VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, plume::RenderFormat::R8G8B8A8_UNORM, false, dumps);
             }
+
+            // The HUD image: half the eye image's size (a stretched 4:3 frame shown on a 4:3
+            // quad of about 40 degrees: some 27 pixels a degree, more than the eyes' 17).
+            createSwapchain(hudChain, (eyeSize[0] + 1) / 2, (eyeSize[1] + 1) / 2, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, plume::RenderFormat::R8G8B8A8_UNORM, false, dumps);
         }
         else {
             dk64vr_logpf("[openxr]", "no R8G8B8A8_SRGB swapchain format; VR output off");
@@ -989,6 +1139,8 @@ private:
         destroySwapchain(eyeChain[0]);
         destroySwapchain(eyeChain[1]);
         destroySwapchain(uiChain);
+        destroySwapchain(hudChain);
+        hudReadback.buffer.reset();
         eyeReadback[0].buffer.reset();
         eyeReadback[1].buffer.reset();
         panelReadback.buffer.reset();
@@ -1219,10 +1371,14 @@ private:
                 recentrePending = false;
                 origin.q = quatFromYaw(quatYaw(headPose.q));
                 origin.p = headPose.p;
+                cinemaAnchored = false;
                 dk64vr_logf("recentre: head yaw %.1f deg, at %.2f %.2f %.2f m", quatYaw(headPose.q) * 180.0f / 3.1415926f, headPose.p.x, headPose.p.y, headPose.p.z);
             }
 
             headInOrigin = poseMul(poseInverse(origin), headPose);
+            // head_translation scales the head's displacement, never the eye offsets (patterns.md).
+            const float translation = float(setting("head_translation"));
+            headInOrigin.p = { headInOrigin.p.x * translation, headInOrigin.p.y * translation, headInOrigin.p.z * translation };
         }
 
         Pose yaw;
@@ -1235,6 +1391,9 @@ private:
         }
 
         dumpDue = (nextDumpFrame > 0) && (dumpsDone < uint64_t(setting("dump_count"))) && (stereoFrames + 1 >= nextDumpFrame);
+        if (dumpDue) {
+            hudDumpDue = true;  // with the next HUD image
+        }
     }
 
     void updateStereoLatch() {
@@ -1263,8 +1422,9 @@ private:
             why = "diag_force_stereo";
         }
         else if (published) {
-            want = sceneIsStereo(state.scene) && cameraSeen;
-            why = sceneName(state.scene);
+            const bool cutscenePanel = (state.scene == DK64VR_SCENE_CUTSCENE) && (int(setting("cutscenes")) == 2);
+            want = sceneIsStereo(state.scene) && cameraSeen && !cutscenePanel;
+            why = cutscenePanel ? "cutscenes on the panel" : sceneName(state.scene);
         }
         else {
             want = false;
@@ -1276,12 +1436,48 @@ private:
             if (++latchCount >= 12) {
                 stereoLatched = want;
                 latchCount = 0;
+                transitionBlink();
                 dk64vr_logf("mode: %s (%s, %u camera projection(s))", want ? "stereo" : "panel", why, lastInfo.cameraProjections);
             }
         }
         else {
             latchCount = 0;
         }
+
+        // The 3D cinema for cutscenes and scripted cameras (standard.md section 4), latched with
+        // hysteresis (lesson 71): in after 6 frames of cutscene, out after 24 without.
+        const bool cinemaWant = stereoLatched && published && (state.scene == DK64VR_SCENE_CUTSCENE) && (int(setting("cutscenes")) == 0);
+        if (cinemaWant != cinemaActive) {
+            if (++cinemaLatchCount >= (cinemaWant ? 6u : 24u)) {
+                cinemaActive = cinemaWant;
+                cinemaLatchCount = 0;
+                cinemaAnchored = false;
+                transitionBlink();
+                dk64vr_logf("cinema: %s", cinemaActive ? "on" : "off");
+            }
+        }
+        else {
+            cinemaLatchCount = 0;
+        }
+    }
+
+    // A short black between flat, stereo and cinema (standard.md section 4 asks for a fade;
+    // this is a cut through black until a fade layer exists).
+    void transitionBlink() {
+        blinkUntilS = std::max(blinkUntilS, displayS + 0.2);
+    }
+
+    // The cinema screen: placed in front of the head (yaw only, centre at eye height) when it
+    // comes on and on recentre.
+    void anchorCinema() {
+        const Quat head = quatMul(origin.q, headInOriginQ);
+        const float yaw = quatYaw(head);
+        const Vec3 eyeMid = { 0.5f * (eyeSubmitPose[0].p.x + eyeSubmitPose[1].p.x), 0.5f * (eyeSubmitPose[0].p.y + eyeSubmitPose[1].p.y), 0.5f * (eyeSubmitPose[0].p.z + eyeSubmitPose[1].p.z) };
+        cinemaScreen.q = quatFromYaw(yaw);
+        const Vec3 ahead = quatRotate(cinemaScreen.q, Vec3 { 0.0f, 0.0f, -float(setting("cinema_distance")) });
+        cinemaScreen.p = { eyeMid.x + ahead.x, eyeMid.y, eyeMid.z + ahead.z };
+        cinemaAnchored = true;
+        dk64vr_logf("cinema: screen %.1f m ahead at yaw %.0f deg, %.1f m wide", setting("cinema_distance"), yaw * 180.0f / 3.1415926f, setting("cinema_width"));
     }
 
 
@@ -1375,6 +1571,17 @@ private:
         sendNav(navHeld);
         updatePointer(s);
         diagSnap();
+        if ((setting("diag_hud_seconds") > 0.0) && stereoLatched && (state.scene == DK64VR_SCENE_GAMEPLAY) && (displayS >= diagHudNextS)) {
+            if (diagHudNextS > 0.0) {
+                dk64vr_request_hud_diag();
+                // An eye dump (with its HUD image) half a second later, while the counters show.
+                if ((setting("dump_frame") > 0.0) && (dumpsDone < uint64_t(setting("dump_count")))) {
+                    nextDumpFrame = stereoFrames + 36;
+                }
+            }
+
+            diagHudNextS = displayS + setting("diag_hud_seconds");
+        }
 
         // The game's Rumble Pak: 40 ms pulses on both hands while the motor runs.
         if (rumbleOn.load() && s.valid) {
@@ -1683,6 +1890,39 @@ private:
         dk64vr_logf("UI image ready (pointer, blink)");
     }
 
+    XrCompositionLayerQuad hudQuad() const {
+        const float distance = float(setting("hud_distance"));
+        const float width = 2.0f * distance * std::tan(20.0f * 3.1415926f / 180.0f) * float(setting("hud_scale")) / 100.0f;
+        Pose head;
+        head.q = quatMul(origin.q, headInOriginQ);
+        head.p = { 0.5f * (eyeSubmitPose[0].p.x + eyeSubmitPose[1].p.x), 0.5f * (eyeSubmitPose[0].p.y + eyeSubmitPose[1].p.y), 0.5f * (eyeSubmitPose[0].p.z + eyeSubmitPose[1].p.z) };
+        Quat facing = head.q;
+        const dk64vr_game_state state = gameState();
+        if (state.scene == DK64VR_SCENE_FIRST_PERSON) {
+            // The crosshair is the game camera's aim: the recentred heading (the game camera's)
+            // with the game camera's pitch.
+            const float dx = state.cam_at[0] - state.cam_eye[0], dy = state.cam_at[1] - state.cam_eye[1], dz = state.cam_at[2] - state.cam_eye[2];
+            const float pitch = std::atan2(dy, std::sqrt(dx * dx + dz * dz));
+            facing = quatMul(origin.q, Quat { std::sin(0.5f * pitch), 0.0f, 0.0f, std::cos(0.5f * pitch) });
+        }
+
+        XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+        quad.space = localSpace;
+        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        quad.subImage.swapchain = hudChain.handle;
+        quad.subImage.imageRect.offset = { 0, 0 };
+        quad.subImage.imageRect.extent = { int32_t(hudChain.width), int32_t(hudChain.height) };
+        quad.pose = toXr(noRollPose(facing, head.p, distance));
+        quad.size = { width, width * 0.75f };
+        if (cinemaActive && cinemaAnchored) {
+            quad.pose = toXr(cinemaHudPose);
+            quad.size = { cinemaHudSize[0], cinemaHudSize[1] };
+        }
+
+        return quad;
+    }
+
     XrCompositionLayerQuad uiQuad(XrSpace space, const Pose &pose, int32_t x, int32_t width, float sizeX, float sizeY) const {
         XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
@@ -1713,7 +1953,7 @@ private:
             quads.push_back(uiQuad(localSpace, beamPose(pointer.origin, end, eye), 64, 32, 0.006f, beamLength));
         }
 
-        const float dotSize = 0.012f * float(setting("panel_distance"));
+        const float dotSize = 0.018f * float(setting("panel_distance"));
         quads.push_back(uiQuad(localSpace, dot, 0, 64, dotSize, dotSize));
     }
 
@@ -1762,6 +2002,13 @@ private:
 
     void releaseEyes() {
         std::scoped_lock lock(*queueMutex);
+        if (hudChain.acquired) {
+            XrSwapchainImageReleaseInfo releaseInfo = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+            xrReleaseSwapchainImage(hudChain.handle, &releaseInfo);
+            hudChain.acquired = false;
+            hudReleasedOnce = true;
+        }
+
         for (uint32_t eye = 0; eye < 2; eye++) {
             Swapchain &chain = eyeChain[eye];
             if (chain.acquired) {
@@ -1850,7 +2097,7 @@ private:
         readback.pending = false;
         void *data = readback.buffer->map();
         if (data != nullptr) {
-            writePngAsync(readback.path, static_cast<const uint8_t *>(data), readback.width, readback.height, readback.width * 4, readback.bgra);
+            writePngAsync(readback.path, static_cast<const uint8_t *>(data), readback.width, readback.height, readback.width * 4, readback.bgra, readback.keepAlpha);
             readback.buffer->unmap();
         }
     }
@@ -1937,6 +2184,24 @@ private:
     Swapchain panelChain;
     Swapchain uiChain;
     Swapchain hudChain;
+    bool hudShown = false;
+    bool hudReleasedOnce = false;
+    bool hudLogged = false;
+    bool hudDumpDue = false;
+    uint32_t lastHudCalls = 0;
+    uint64_t hudSignatureShown = 0;
+    uint64_t hudGameFrames = 0;
+    uint64_t hudLastDrawnFrame = 0;
+    uint32_t hudSkipsSame = 0, hudSkipsRate = 0;
+    uint32_t hudPartChanges[7] = {};
+    double hudCpuSum = 0.0, hudGpuSum = 0.0;
+    uint32_t hudPasses = 0;
+    Readback hudReadback = makeAlphaReadback();
+    static Readback makeAlphaReadback() {
+        Readback r;
+        r.keepAlpha = true;
+        return r;
+    }
     bool layersLogDue = false;
     bool uiReady = false;
     std::vector<XrCompositionLayerQuad> extraQuadStorage;
@@ -2021,6 +2286,13 @@ private:
     double uiRequestUntilS = 0.0;
     bool panelShownLast = false;
     bool cinemaActive = false;
+    bool cinemaAnchored = false;
+    float cinemaLoggedTop = -1.0f, cinemaLoggedViewport = -1.0f;
+    uint32_t cinemaLatchCount = 0;
+    Pose cinemaScreen;
+    Pose cinemaHudPose;
+    float cinemaHudSize[2] = { 3.6f, 2.7f };
+    FovTangents cinemaGameTan = { -0.552f, 0.552f, 0.414f, -0.414f };
     Quat headInOriginQ;
     float turnRemainder = 0.0f;
     bool turnActive = false;
@@ -2037,10 +2309,12 @@ private:
     } pointer;
     bool pointerDown = false;
     uint32_t diagMenuReads = 0;
+    double diagHudNextS = 0.0;
     double diagSnapNextS = 0.0;
     int diagSnapFrames = -1;
     int pointerPx = -1, pointerPy = -1;
 
+    bool hudFailed = false;
     bool waitFailed = false, beginFailed = false, endFailed = false, panelFailed = false, acquireFailed = false;
     bool fovFallback = false, ipdFallback = false, ipdLogged = false;
 };

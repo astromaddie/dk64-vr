@@ -74,6 +74,38 @@ Vec3 viewPosition(const Mat4 &view);
 Mat4 orbitView(const Mat4 &view, float targetHeadingRad, float pivotDistance, float *delta);
 float wrapAngle(float radians);  // to -pi..pi
 
+// 3D cinema (standard.md section 4, lessons 45 and 82). The game camera's picture goes on a
+// world-locked screen, submitted as a projection layer: each eye's view has the screen's
+// orientation and the eye's position, and its field of view is the screen rectangle as that eye
+// sees it, so each eye's image lands exactly on the screen.
+//
+// Tangents (left, right, up, down; left and down negative) of the screen (centre `screen.p`, the
+// quad in the pose's XY plane facing +Z, width x height metres) seen from `eye`.
+FovTangents screenFov(const Pose &screen, float width, float height, const Vec3 &eye);
+
+// The game camera split into two eyes for the screen: the eyes sit +-separation/2 along the
+// camera's x axis and their frusta are shifted to converge at `convergence` game units (the
+// game's near plane, so nothing drawn is in front of the screen and the scene keeps positive
+// parallax). `gameTan` is the game camera's own frustum; the result is one eye's.
+struct CinemaEye {
+    Mat4 view;
+    FovTangents tan;
+};
+CinemaEye cinemaEye(const Mat4 &gameView, const FovTangents &gameTan, float separation, float convergence, int eye);
+
+// The separation (game units) that puts a point at infinity `infinityMetres` apart on a screen
+// `screenWidth` metres wide (lesson 82's positive parallax only: 0 at the convergence distance,
+// growing to this at infinity).
+float cinemaSeparation(float infinityMetres, float screenWidth, const FovTangents &gameTan, float convergence);
+
+// The game projection's symmetric frustum tangents (guPerspective: the scale cancels).
+FovTangents gameFov(const Mat4 &gameProj);
+
+// The HUD alpha solve, as lib/rt64/src/shaders/VrHudSolvePS.hlsl does it per pixel: from the
+// HUD drawn over black (b = a * c) and over white (w = a * c + 1 - a), the coverage
+// a = 1 - mean(w - b) and the unpremultiplied colour c = b / a (0 where a < 1/255).
+void hudSolve(const float black[3], const float white[3], float colour[3], float &alpha);
+
 // libultra transcriptions (guPerspectiveF, guLookAtF), used as references by the tests.
 Mat4 guPerspective(float fovyDegrees, float aspect, float nearZ, float farZ, float scale);
 Mat4 guLookAt(const Vec3 &eye, const Vec3 &at, const Vec3 &up);

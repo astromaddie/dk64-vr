@@ -173,11 +173,22 @@ static void vr_fill_camera(VrGameState *s) {
     }
 }
 
+// The game's "show this HUD counter" (hud.c): item, freeze, delay.
+void func_global_asm_806F8BC4(s32 HUDItemIndex, u8 arg1, s32 arg2);
+
 void vr_frame_hook(void) {
     s32 scene;
     s32 active;
+    s32 item;
 
     scene = vr_classify_scene();
+    // Diagnostic (diag_hud_seconds): the counters on screen for an unattended HUD dump.
+    if (recomp_vr_take_hud_diag() && (scene == VR_SCENE_GAMEPLAY)) {
+        for (item = 0; item < 8; item++) {
+            func_global_asm_806F8BC4(item, 0, 0);
+        }
+        recomp_printf("[vr] diag: HUD counters shown\n");
+    }
     vr_state.frame = ++vr_frame_count;
     vr_state.scene = scene;
     if (character_change_array != NULL) {

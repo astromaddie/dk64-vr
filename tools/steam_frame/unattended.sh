@@ -28,6 +28,7 @@ have_args=0
 for kv in "$@"; do
 	case "$kv" in
 		ARGS=*) diag+="$kv"$'\n'; have_args=1 ;;
+		RT64_VR_*=*) diag+="$kv"$'\n' ;;
 		*=*) k="${kv%%=*}"; diag+="DK64_VR_$(printf '%s' "$k" | tr '[:lower:]' '[:upper:]')=${kv#*=}"$'\n' ;;
 	esac
 done

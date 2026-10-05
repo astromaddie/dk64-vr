@@ -9,8 +9,8 @@
 namespace dk64vr {
 
 // Writes an RGBA8 (or BGRA8, swapped to RGBA) image as PNG on a detached thread. The pixels are
-// copied before this returns.
-void writePngAsync(const std::string &path, const uint8_t *pixels, uint32_t width, uint32_t height, uint32_t rowBytes, bool bgra);
+// copied before this returns. Alpha is written as 255 unless keepAlpha (the HUD image).
+void writePngAsync(const std::string &path, const uint8_t *pixels, uint32_t width, uint32_t height, uint32_t rowBytes, bool bgra, bool keepAlpha = false);
 
 // Autostart: for `seconds` after start(), presses A (and every fourth time Start) on a schedule,
 // merged into player 1's N64 buttons, until stop().

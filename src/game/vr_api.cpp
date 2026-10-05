@@ -143,6 +143,18 @@ extern "C" int dk64vr_take_turn(void) {
     return degrees;
 }
 
+namespace {
+std::atomic<int> g_hud_diag{0};
+}
+
+extern "C" void dk64vr_request_hud_diag(void) {
+    g_hud_diag.store(1);
+}
+
+extern "C" int dk64vr_take_hud_diag(void) {
+    return g_hud_diag.exchange(0);
+}
+
 // The runtime's quit flag (librecomp/src/recomp.cpp), so a paused game never holds up a quit.
 extern std::atomic_bool exited;
 
@@ -169,4 +181,9 @@ extern "C" void recomp_vr_publish_game_state(uint8_t* rdram, recomp_context* ctx
 extern "C" void recomp_vr_take_turn(uint8_t* rdram, recomp_context* ctx) {
     (void)rdram;
     _return(ctx, dk64vr_take_turn());
+}
+
+extern "C" void recomp_vr_take_hud_diag(uint8_t* rdram, recomp_context* ctx) {
+    (void)rdram;
+    _return(ctx, dk64vr_take_hud_diag());
 }

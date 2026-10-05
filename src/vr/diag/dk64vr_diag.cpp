@@ -22,7 +22,7 @@ double monotonicSeconds() {
     return duration<double>(steady_clock::now().time_since_epoch()).count();
 }
 
-void writePngAsync(const std::string &path, const uint8_t *pixels, uint32_t width, uint32_t height, uint32_t rowBytes, bool bgra) {
+void writePngAsync(const std::string &path, const uint8_t *pixels, uint32_t width, uint32_t height, uint32_t rowBytes, bool bgra, bool keepAlpha) {
     std::vector<uint8_t> rgba(size_t(width) * height * 4);
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t *src = pixels + size_t(y) * rowBytes;
@@ -31,7 +31,7 @@ void writePngAsync(const std::string &path, const uint8_t *pixels, uint32_t widt
             dst[x * 4 + 0] = src[x * 4 + (bgra ? 2 : 0)];
             dst[x * 4 + 1] = src[x * 4 + 1];
             dst[x * 4 + 2] = src[x * 4 + (bgra ? 0 : 2)];
-            dst[x * 4 + 3] = 255;
+            dst[x * 4 + 3] = keepAlpha ? src[x * 4 + 3] : 255;
         }
     }
 

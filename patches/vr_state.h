@@ -43,6 +43,8 @@ DECLARE_FUNC(s32, recomp_vr_is_active);
 DECLARE_FUNC(void, recomp_vr_publish_game_state, const struct VrGameState*);
 // Comfort turn in whole degrees, positive = right (src/vr/include/dk64vr_control.h).
 DECLARE_FUNC(s32, recomp_vr_take_turn);
+// Diagnostic: nonzero once when the host wants the HUD counters shown (diag_hud_seconds).
+DECLARE_FUNC(s32, recomp_vr_take_hud_diag);
 
 #ifdef MIPS
 // vr_scene.c
