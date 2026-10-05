@@ -231,6 +231,11 @@ draws now take the uniform path whenever their wave agrees on the tile. The righ
 ~1.2 ms is the compositor preempting whichever eye is rendered second (`RT64_VR_EYE_ORDER=swap`
 moves it to the left eye; the same camera or the same target for both eyes doesn't remove it).
 
+HUD text clipped in the speech bubble (fixed): the flat output of the same moment shows the whole
+text, centred. In the VR passes RT64 widened every projection with a viewport narrower than the frame
+by the eye's axis-scale ratio (4:3), so the text overran the game's own text-box scissor
+(27.75,65.75-164.5,145.5); `DrawParams::vrStretched` fixes it for eye and HUD passes.
+
 ## 6. Draw inventory
 
 | Item | VR rule |
