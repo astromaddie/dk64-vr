@@ -513,7 +513,7 @@ logs and dumps (and composites rebuilt from them); it never pressed a button.
 | Pause when unfocused or in standby, quit while paused | verified unattended (game rate 0 Hz while the XR loop runs at 72; clean quit) |
 | Rumble Pak to haptics | built; not exercised (no wearer) |
 | Diagnostics (above) | verified unattended |
-| VR settings menu (Menu + View: quick menu, full panel), chord resolution, live settings and `vr.toml` writes | host-tested (chord timing, rows and keys, Defaults, world size, save round trip); unattended: see section 9a's dumps; headset-unverified |
+| VR settings menu (Menu + View: quick menu, full panel), chord resolution, live settings and `vr.toml` writes | host-tested (chord timing, rows and keys, Defaults, world size, scrolling, save round trip); verified unattended (`diag_vr_menu_at` tour from DK Isles: opens over the frozen world with the game paused, pad focus and repeats, pointer hover and a trigger click into the full panel, all five tabs, scrolling, Defaults armed, back and close, game resumes; panel dumps and composites checked at 1:1); the chord itself and real controller input headset-unverified |
 | Vignette (also during the smooth orbit), fade on flat/stereo/cinema switches (still a 0.2 s black cut), roomscale, seated mode, camera shake off | not started (the vignette is deferred: it needs its own radial image and an alpha ramp) |
 
 ## 8. Controls
@@ -656,6 +656,12 @@ model: rows, focus, pointer, Defaults, scrolling, and the RML it writes; pure, h
   recomp menu the menu covers the panel with a dark backdrop instead. Closing resumes; the button
   that closed it is ignored until released (`InputMapper::ignoreHeld`).
 - Sizes follow the mockup: 1 degree is about 30 px at 2 m, text 26 px or more, targets 76 px or more.
+- RT64 presents in present-early mode, after the game's workloads; with the game paused there are
+  none, so while the menu is open the host asks for a present on every VI tick
+  (`VrHost::presentWithoutWorkloads`), and recompui keeps drawing.
+- RmlUi does not clip some row controls (flex, rounded) to the list's `overflow: hidden`: the list
+  scrolls by a negative margin and the title bar, list header and hint bar are opaque layers above
+  it (z-index), which cover anything that escapes.
 
 ## 10. Wear checklist (about 15 minutes)
 

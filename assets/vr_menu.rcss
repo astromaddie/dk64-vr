@@ -251,7 +251,7 @@ div, span { box-sizing: border-box; }
     height: 868px;
     display: flex;
     flex-direction: column;
-    background-color: rgba(10, 10, 11, 0.95);
+    background-color: rgb(10, 10, 11);
     border-width: 2px;
     border-color: rgba(255, 255, 255, 0.1);
     border-radius: 28px;
@@ -312,13 +312,19 @@ div, span { box-sizing: border-box; }
     height: 1000px;
     display: flex;
     flex-direction: column;
-    background-color: rgba(10, 10, 11, 0.95);
+    background-color: rgb(10, 10, 11);
     border-width: 2px;
     border-color: rgba(255, 255, 255, 0.1);
     border-radius: 24px;
     overflow: hidden;
 }
+/* The bars sit above the row list: RmlUi does not clip some row controls (flex, rounded) to
+   the list, so the bars cover whatever escapes it. */
+.vb-top, .vb-head, .vb-foot { position: relative; z-index: 2; }
+.vb-top { border-top-left-radius: 22px; border-top-right-radius: 22px; }
+.vb-foot { border-bottom-left-radius: 22px; border-bottom-right-radius: 22px; }
 .vb-top {
+    background-color: rgb(10, 10, 11);
     display: flex;
     flex-direction: row;
     align-items: center;
@@ -359,7 +365,7 @@ div, span { box-sizing: border-box; }
 .vb-tab.on .mark { background-color: rgb(247, 158, 8); }
 .vb-main { flex: 1 1 0px; height: 792px; }
 .vb-head {
-    position: relative;
+    background-color: rgb(10, 10, 11);
     display: flex;
     flex-direction: row;
     align-items: center;
@@ -397,11 +403,11 @@ div, span { box-sizing: border-box; }
     padding: 0px 44px 0px 10px;
     border-top-width: 2px;
     border-color: rgba(255, 255, 255, 0.1);
-    background-color: rgba(0, 0, 0, 0.35);
+    background-color: rgb(7, 7, 7);
 }
 
 /* ---- toast ---- */
-.toast { position: absolute; left: 0px; right: 0px; bottom: 150px; display: flex; flex-direction: row; justify-content: center; }
+.toast { z-index: 3; position: absolute; left: 0px; right: 0px; bottom: 150px; display: flex; flex-direction: row; justify-content: center; }
 .toast .tw {
     padding: 24px 36px;
     border-radius: 18px;
