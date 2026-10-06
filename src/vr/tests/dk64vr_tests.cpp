@@ -18,6 +18,7 @@
 #include "dk64vr_settings.h"
 #include "dk64vr_log.h"
 #include "shared/rt64_projection_fog.h"
+#include "shared/rt64_vr_billboard.h"
 #include "dk64vr_menu.h"
 
 using namespace dk64vr;
@@ -2280,6 +2281,304 @@ static void testMenuModel() {
     dk64vr_settings_free(&back);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Camera-facing billboards (lib/rt64/src/shared/rt64_vr_billboard.h)
+
+// The game's matrix stack operations on rows (Banjo's mlMtxRotYaw/RotPitch/RotRoll/Scale_xyz:
+// each one is applied to the vertex before what is already on the stack).
+struct BbMat {
+    double m[4][4] = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 } };
+    void rows(int a, int b, double ca, double sa, double cb, double sb) {
+        for (int i = 0; i < 3; i++) {
+            const double x = m[a][i], y = m[b][i];
+            m[a][i] = x * ca + y * sa;
+            m[b][i] = x * cb + y * sb;
+        }
+    }
+    void yaw(double deg) { const double r = deg * M_PI / 180.0; rows(0, 2, std::cos(r), -std::sin(r), std::sin(r), std::cos(r)); }
+    void pitch(double deg) { const double r = deg * M_PI / 180.0; rows(1, 2, std::cos(r), std::sin(r), -std::sin(r), std::cos(r)); }
+    void roll(double deg) { const double r = deg * M_PI / 180.0; rows(0, 1, std::cos(r), std::sin(r), -std::sin(r), std::cos(r)); }
+    void scale(double x, double y, double z) { for (int i = 0; i < 3; i++) { m[0][i] *= x; m[1][i] *= y; m[2][i] *= z; } }
+    void translate(double x, double y, double z) { m[3][0] = x; m[3][1] = y; m[3][2] = z; }
+    void toFloat(float out[16]) const { for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) out[r * 4 + c] = float(m[r][c]); }
+};
+
+static BbMat bbCamera(double yawDeg, double pitchDeg) {
+    BbMat c;
+    c.yaw(yawDeg);
+    c.pitch(pitchDeg);
+    return c;
+}
+
+static Vec3 bbRow(const float m[16], int r) { return { m[r * 4 + 0], m[r * 4 + 1], m[r * 4 + 2] }; }
+static float bbLen(const Vec3 &v) { return std::sqrt(dot(v, v)); }
+static float bbDet(const float m[16]) { return dot(cross(bbRow(m, 0), bbRow(m, 1)), bbRow(m, 2)); }
+
+static void testBillboardGameBasis() {
+    // The camera basis Banjo builds sprites from (sViewportMatrix: yaw, then pitch): row 2 is the
+    // camera's back axis (its look vector is (0,0,-1) through it) and row 0 stays level.
+    float m[16];
+    bbCamera(30.0, -20.0).toFloat(m);
+    CHECK_NEAR(bbRow(m, 0).y, 0.0, 1e-7);
+    CHECK_NEAR(bbDet(m), 1.0, 1e-6);
+    bbCamera(0.0, -20.0).toFloat(m);
+    CHECK_NEAR(bbRow(m, 2).x, 0.0, 1e-7);
+    CHECK_NEAR(bbRow(m, 2).y, std::sin(20.0 * M_PI / 180.0), 1e-6);
+    CHECK_NEAR(bbRow(m, 2).z, std::cos(20.0 * M_PI / 180.0), 1e-6);
+}
+
+static void testBillboardFacesViewpointAlongItsAxis() {
+    // A viewpoint on the billboard's own axis: the spherical facing changes nothing.
+    BbMat b = bbCamera(-65.0, -25.0);
+    b.roll(37.0);
+    b.translate(1200.0, 85.0, -3400.0);
+    b.scale(-1.5, 1.5, 1.5);
+    float m[16], orig[16];
+    b.toFloat(m);
+    std::memcpy(orig, m, sizeof(m));
+    const Vec3 axis = normalize(bbRow(m, 2));
+    const float vp[3] = { m[12] + axis.x * 700.0f, m[13] + axis.y * 700.0f, m[14] + axis.z * 700.0f };
+    CHECK(RT64::vrFaceBillboard(m, vp, RT64::VrBillboardMode::Spherical));
+    for (int i = 0; i < 16; i++) {
+        CHECK_NEAR(m[i], orig[i], 2e-5);
+    }
+}
+
+static void testBillboardCylindrical() {
+    // A prop sprite (func_80344138: camera basis, then a mirrored scale), the viewpoint off to the
+    // side and above: upright, its normal level towards the viewpoint, position, scale and mirror kept.
+    for (double yawDeg : { 0.0, 47.0, 180.0, -120.0 }) {
+        for (double pitchDeg : { 0.0, -30.0, 15.0 }) {
+            BbMat b = bbCamera(yawDeg, pitchDeg);
+            b.translate(-250.0, 40.0, 900.0);
+            b.scale(-0.8, 0.8, 0.8);
+            float m[16], orig[16];
+            b.toFloat(m);
+            std::memcpy(orig, m, sizeof(m));
+            const float vp[3] = { 100.0f, 400.0f, 300.0f };
+            CHECK(RT64::vrFaceBillboard(m, vp, RT64::VrBillboardMode::Cylindrical));
+            for (int i = 12; i < 16; i++) {
+                CHECK(m[i] == orig[i]);
+            }
+            CHECK_NEAR(m[4], 0.0, 1e-5);
+            CHECK_NEAR(m[5], 0.8, 1e-5);
+            CHECK_NEAR(m[6], 0.0, 1e-5);
+            const Vec3 back = bbRow(m, 2);
+            CHECK_NEAR(back.y, 0.0, 1e-5);
+            CHECK_NEAR(bbLen(back), 0.8, 1e-5);
+            const Vec3 toView = normalize(Vec3{ vp[0] - m[12], 0.0f, vp[2] - m[14] });
+            CHECK_NEAR(dot(normalize(back), toView), 1.0, 1e-5);
+            CHECK_NEAR(bbLen(bbRow(m, 0)), 0.8, 1e-5);
+            CHECK_NEAR(bbRow(m, 0).y, 0.0, 1e-5);
+            CHECK_NEAR(bbDet(m), bbDet(orig), 1e-5);  // still mirrored
+        }
+    }
+}
+
+static void testBillboardSphericalKeepsRoll() {
+    // A particle (func_80344424: camera basis, roll, scale): it faces the viewpoint with the same
+    // roll relative to the level axis, and the same scale.
+    const double rollDeg = 37.0;
+    BbMat b = bbCamera(110.0, -18.0);
+    b.roll(rollDeg);
+    b.translate(500.0, 120.0, -60.0);
+    b.scale(2.0, 2.0, 2.0);
+    float m[16], orig[16];
+    b.toFloat(m);
+    std::memcpy(orig, m, sizeof(m));
+    const float vp[3] = { -300.0f, 260.0f, 410.0f };
+    CHECK(RT64::vrFaceBillboard(m, vp, RT64::VrBillboardMode::Spherical));
+    const Vec3 toView = normalize(Vec3{ vp[0] - m[12], vp[1] - m[13], vp[2] - m[14] });
+    CHECK_NEAR(dot(normalize(bbRow(m, 2)), toView), 1.0, 1e-6);
+    const Vec3 right = normalize(cross(Vec3{ 0.0f, 1.0f, 0.0f }, toView));
+    const Vec3 up = cross(toView, right);
+    const Vec3 x = bbRow(m, 0);
+    CHECK_NEAR(std::atan2(dot(x, up), dot(x, right)) * 180.0 / M_PI, rollDeg, 1e-3);
+    for (int r = 0; r < 3; r++) {
+        CHECK_NEAR(bbLen(bbRow(m, r)), 2.0, 1e-5);
+    }
+    CHECK_NEAR(dot(bbRow(m, 0), bbRow(m, 1)), 0.0, 1e-4);
+    CHECK_NEAR(bbDet(m), bbDet(orig), 1e-4);
+    CHECK(m[12] == orig[12] && m[13] == orig[13] && m[14] == orig[14]);
+}
+
+static void testBillboardSideOfGameView() {
+    // The case it is for: a billboard 90 degrees to the side of the game camera is edge-on to a
+    // viewer at the camera; facing turns it to the viewer.
+    BbMat b = bbCamera(0.0, 0.0);  // camera looking down -Z
+    b.translate(800.0, 0.0, 0.0);  // to its right
+    float m[16];
+    b.toFloat(m);
+    const float vp[3] = { 0.0f, 0.0f, 0.0f };
+    CHECK_NEAR(dot(normalize(bbRow(m, 2)), Vec3{ -1.0f, 0.0f, 0.0f }), 0.0, 1e-6);  // edge-on
+    CHECK(RT64::vrFaceBillboard(m, vp, RT64::VrBillboardMode::Cylindrical));
+    CHECK_NEAR(dot(normalize(bbRow(m, 2)), Vec3{ -1.0f, 0.0f, 0.0f }), 1.0, 1e-6);
+}
+
+static void testBillboardFlat() {
+    // A flat billboard (zero Z scale, as DK64's sprites): its normal comes from rows 0 and 1, on
+    // the game camera's side; mirroring is kept.
+    for (double sx : { 1.25, -1.25 }) {
+        BbMat b = bbCamera(35.0, -15.0);
+        b.roll(20.0);
+        b.translate(400.0, 30.0, -900.0);
+        b.scale(sx, 1.25, 0.0);
+        float m[16];
+        b.toFloat(m);
+        const Vec3 camBack = normalize(Vec3{ float(bbCamera(35.0, -15.0).m[2][0]), float(bbCamera(35.0, -15.0).m[2][1]), float(bbCamera(35.0, -15.0).m[2][2]) });
+        const float game[3] = { m[12] + camBack.x * 500.0f, m[13] + camBack.y * 500.0f, m[14] + camBack.z * 500.0f };
+        // Facing the game camera itself changes nothing.
+        float same[16];
+        std::memcpy(same, m, sizeof(m));
+        CHECK(RT64::vrFaceBillboard(same, game, RT64::VrBillboardMode::Spherical, game));
+        for (int i = 0; i < 16; i++) {
+            CHECK_NEAR(same[i], m[i], 2e-5);
+        }
+        const float vp[3] = { -200.0f, 300.0f, 100.0f };
+        CHECK(RT64::vrFaceBillboard(m, vp, RT64::VrBillboardMode::Spherical, game));
+        const Vec3 toView = normalize(Vec3{ vp[0] - m[12], vp[1] - m[13], vp[2] - m[14] });
+        const Vec3 n = cross(bbRow(m, 0), bbRow(m, 1));
+        CHECK_NEAR(dot(normalize(n), toView), sx > 0.0 ? 1.0 : -1.0, 1e-5);
+        CHECK_NEAR(bbLen(bbRow(m, 2)), 0.0, 1e-6);
+        CHECK_NEAR(bbLen(bbRow(m, 0)), 1.25, 1e-5);
+    }
+}
+
+static void testBillboardPivot() {
+    // A model's billboard node (func_803384A8): translate(-c), scale, the camera's yaw, then the
+    // node's position p. Turned about c, the node stays at p and faces the viewpoint from there.
+    const double c[3] = { 450.0, 330.0, -190.0 };
+    BbMat rot = bbCamera(140.0, 0.0);  // yaw only (cylindrical node)
+    BbMat m3;
+    // M = T(-c) * S * R * T(p) in row-vector order: rows = R scaled, row 3 = p - c * S * R.
+    const double s = 1.5;
+    const double p[3] = { 2100.0, 400.0, -800.0 };
+    for (int r = 0; r < 3; r++) {
+        for (int k = 0; k < 3; k++) {
+            m3.m[r][k] = rot.m[r][k] * s;
+        }
+    }
+    for (int k = 0; k < 3; k++) {
+        m3.m[3][k] = p[k] - (c[0] * m3.m[0][k] + c[1] * m3.m[1][k] + c[2] * m3.m[2][k]);
+    }
+    float m[16];
+    m3.toFloat(m);
+    const float pivot[3] = { float(c[0]), float(c[1]), float(c[2]) };
+    const float vp[3] = { 2500.0f, 900.0f, 300.0f };
+    CHECK(RT64::vrFaceBillboard(m, vp, RT64::VrBillboardMode::Cylindrical, nullptr, pivot));
+    const Vec3 at = transformPoint(Vec3{ pivot[0], pivot[1], pivot[2] }, Mat4{ { { m[0], m[1], m[2], m[3] }, { m[4], m[5], m[6], m[7] }, { m[8], m[9], m[10], m[11] }, { m[12], m[13], m[14], m[15] } } });
+    CHECK_NEAR(at.x, p[0], 2e-2);
+    CHECK_NEAR(at.y, p[1], 2e-2);
+    CHECK_NEAR(at.z, p[2], 2e-2);
+    const Vec3 toView = normalize(Vec3{ vp[0] - float(p[0]), 0.0f, vp[2] - float(p[2]) });
+    CHECK_NEAR(dot(normalize(bbRow(m, 2)), toView), 1.0, 1e-5);
+    CHECK_NEAR(bbRow(m, 1).y, 1.5, 1e-5);
+    // Without the pivot it would turn about the far-away model origin and leave the node's place.
+    float origin[16];
+    m3.toFloat(origin);
+    CHECK(RT64::vrFaceBillboard(origin, vp, RT64::VrBillboardMode::Cylindrical));
+    const Vec3 moved = transformPoint(Vec3{ pivot[0], pivot[1], pivot[2] }, Mat4{ { { origin[0], origin[1], origin[2], origin[3] }, { origin[4], origin[5], origin[6], origin[7] }, { origin[8], origin[9], origin[10], origin[11] }, { origin[12], origin[13], origin[14], origin[15] } } });
+    CHECK(std::fabs(moved.x - float(p[0])) + std::fabs(moved.z - float(p[2])) > 100.0f);
+}
+
+static void testBillboardMatching() {
+    // Matching: upright when the game built it upright (yaw only), complete when it pitched it.
+    const float vp[3] = { 100.0f, 500.0f, 300.0f };
+    BbMat level = bbCamera(60.0, 0.0);
+    level.translate(-200.0, 0.0, -400.0);
+    float a[16], b[16];
+    level.toFloat(a);
+    level.toFloat(b);
+    CHECK(RT64::vrFaceBillboard(a, vp, RT64::VrBillboardMode::Matching));
+    CHECK(RT64::vrFaceBillboard(b, vp, RT64::VrBillboardMode::Cylindrical));
+    for (int i = 0; i < 16; i++) {
+        CHECK(a[i] == b[i]);
+    }
+    BbMat pitched = bbCamera(60.0, -25.0);
+    pitched.translate(-200.0, 0.0, -400.0);
+    pitched.toFloat(a);
+    pitched.toFloat(b);
+    CHECK(RT64::vrFaceBillboard(a, vp, RT64::VrBillboardMode::Matching));
+    CHECK(RT64::vrFaceBillboard(b, vp, RT64::VrBillboardMode::Spherical));
+    for (int i = 0; i < 16; i++) {
+        CHECK(a[i] == b[i]);
+    }
+}
+
+static void testBillboardDegenerate() {
+    float m[16], orig[16];
+    BbMat b = bbCamera(20.0, -10.0);
+    b.translate(5.0, 6.0, 7.0);
+    b.toFloat(m);
+    std::memcpy(orig, m, sizeof(m));
+    const float at[3] = { 5.0f, 6.0f, 7.0f };
+    CHECK(!RT64::vrFaceBillboard(m, at, RT64::VrBillboardMode::Spherical));
+    CHECK(!RT64::vrFaceBillboard(m, at, RT64::VrBillboardMode::Cylindrical));
+    const float above[3] = { 5.0f, 600.0f, 7.0f };
+    CHECK(!RT64::vrFaceBillboard(m, above, RT64::VrBillboardMode::Cylindrical));
+    CHECK(!RT64::vrFaceBillboard(m, above, RT64::VrBillboardMode::None));
+    CHECK(std::memcmp(m, orig, sizeof(m)) == 0);
+    // Straight above, spherical keeps the game's level axis.
+    CHECK(RT64::vrFaceBillboard(m, above, RT64::VrBillboardMode::Spherical));
+    CHECK_NEAR(dot(normalize(bbRow(m, 2)), Vec3{ 0.0f, 1.0f, 0.0f }), 1.0, 1e-6);
+    CHECK_NEAR(dot(normalize(bbRow(m, 0)), normalize(bbRow(orig, 0))), 1.0, 1e-5);
+    // Built looking straight down: no level axis to recover.
+    BbMat down = bbCamera(0.0, -90.0);
+    down.toFloat(m);
+    std::memcpy(orig, m, sizeof(m));
+    const float vp[3] = { 100.0f, 50.0f, 0.0f };
+    CHECK(!RT64::vrFaceBillboard(m, vp, RT64::VrBillboardMode::Spherical));
+    CHECK(std::memcmp(m, orig, sizeof(m)) == 0);
+}
+
+static void testBillboardGroups() {
+    const RT64::VrBillboardGroup groups[2] = {
+        { 0x40000000u, 0x7FFFFFFFu, RT64::VrBillboardMode::Cylindrical },
+        { 0x80000000u, 0xBFFFFFFFu, RT64::VrBillboardMode::Spherical } };
+    CHECK(RT64::vrBillboardMode(groups, 2, 0x3FFFFFFFu) == RT64::VrBillboardMode::None);
+    CHECK(RT64::vrBillboardMode(groups, 2, 0x40000000u) == RT64::VrBillboardMode::Cylindrical);
+    CHECK(RT64::vrBillboardMode(groups, 2, 0x7FFFFFFFu) == RT64::VrBillboardMode::Cylindrical);
+    CHECK(RT64::vrBillboardMode(groups, 2, 0x80000000u) == RT64::VrBillboardMode::Spherical);
+    CHECK(RT64::vrBillboardMode(groups, 2, 0xC0000000u) == RT64::VrBillboardMode::None);
+    CHECK(RT64::vrBillboardMode(groups, 2, 0xFFFFFFFFu) == RT64::VrBillboardMode::None);  // G_EX_ID_AUTO
+    CHECK(RT64::vrBillboardMode(groups, 0, 0x40000000u) == RT64::VrBillboardMode::None);
+}
+
+static void testBillboardViewpointBothEyes() {
+    // Both eyes face one point, midway between them through the same view as the eye views; a
+    // head turn about that point leaves it (and so every billboard) where it is.
+    Mat4 game = guLookAt({ 300.0f, 200.0f, 900.0f }, { 0.0f, 50.0f, 0.0f }, { 0.0f, 1.0f, 0.0f });
+    Pose l, r;
+    l.p = { -0.032f, 0.01f, 0.02f };
+    r.p = { 0.032f, 0.01f, 0.02f };
+    const float ws = 100.0f;
+    const Vec3 vp = billboardViewpoint(game, l, r, ws);
+    const Vec3 pl = viewPosition(eyeView(game, l, ws)), pr = viewPosition(eyeView(game, r, ws));
+    CHECK_NEAR(vp.x, 0.5 * (pl.x + pr.x), 1e-3);
+    CHECK_NEAR(vp.y, 0.5 * (pl.y + pr.y), 1e-3);
+    CHECK_NEAR(vp.z, 0.5 * (pl.z + pr.z), 1e-3);
+    // The head turned 70 degrees and pitched 20 about the point between the eyes.
+    const Quat turn = quatMul(quatFromYaw(70.0f * float(M_PI) / 180.0f), Quat{ std::sin(0.5f * 20.0f * float(M_PI) / 180.0f), 0.0f, 0.0f, std::cos(0.5f * 20.0f * float(M_PI) / 180.0f) });
+    const Vec3 mid = { 0.0f, 0.01f, 0.02f };
+    Pose l2, r2;
+    l2.q = r2.q = turn;
+    const Vec3 dl = quatRotate(turn, Vec3{ -0.032f, 0.0f, 0.0f }), dr = quatRotate(turn, Vec3{ 0.032f, 0.0f, 0.0f });
+    l2.p = { mid.x + dl.x, mid.y + dl.y, mid.z + dl.z };
+    r2.p = { mid.x + dr.x, mid.y + dr.y, mid.z + dr.z };
+    const Vec3 vp2 = billboardViewpoint(game, l2, r2, ws);
+    CHECK_NEAR(vp2.x, vp.x, 1e-3);
+    CHECK_NEAR(vp2.y, vp.y, 1e-3);
+    CHECK_NEAR(vp2.z, vp.z, 1e-3);
+    // Leaning 0.3 m to the right moves it 30 units along the game camera's right axis.
+    Pose l3 = l, r3 = r;
+    l3.p.x += 0.3f;
+    r3.p.x += 0.3f;
+    const Vec3 vp3 = billboardViewpoint(game, l3, r3, ws);
+    const Mat4 cam = rigidInverse(game);
+    const Vec3 rightAxis = { cam.m[0][0], cam.m[0][1], cam.m[0][2] };
+    CHECK_NEAR(dot(Vec3{ vp3.x - vp.x, vp3.y - vp.y, vp3.z - vp.z }, rightAxis), 30.0, 1e-2);
+}
+
 int main() {
     testEyeProjectionMatchesGuPerspective();
     testEyeProjectionAsymmetricEdges();
@@ -2327,6 +2626,17 @@ int main() {
     testChord();
     testWorldSize();
     testMenuModel();
+    testBillboardGameBasis();
+    testBillboardFacesViewpointAlongItsAxis();
+    testBillboardCylindrical();
+    testBillboardSphericalKeepsRoll();
+    testBillboardSideOfGameView();
+    testBillboardFlat();
+    testBillboardPivot();
+    testBillboardMatching();
+    testBillboardDegenerate();
+    testBillboardGroups();
+    testBillboardViewpointBothEyes();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

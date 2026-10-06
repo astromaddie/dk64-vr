@@ -59,6 +59,15 @@ namespace {
 const uint32_t CameraGroup = 5;
 const uint32_t CameraGroupSky = 4;
 
+// Camera-facing billboards: in VR the patches set a flag above every matrix group id
+// (patches/common_structs.h, MTXTAG_VR_BILLBOARD_*) on the groups of camera-facing sprites. RT64
+// turns them to the point between the eyes (rt64_vr_billboard.h).
+const RT64::VrBillboardGroup BillboardGroups[] = {
+    { 0x40000000u, 0x7FFFFFFFu, RT64::VrBillboardMode::Cylindrical },
+    { 0x80000000u, 0xBFFFFFFFu, RT64::VrBillboardMode::Spherical },
+    { 0xC0000000u, 0xFFFFFFFEu, RT64::VrBillboardMode::Matching },
+};
+
 const char *xrResultName(XrInstance instance, XrResult result) {
     static thread_local char buffer[XR_MAX_RESULT_STRING_SIZE];
     if ((instance == XR_NULL_HANDLE) || XR_FAILED(xrResultToString(instance, result, buffer))) {
@@ -592,7 +601,31 @@ public:
         secondary = CameraGroupSky;
     }
 
+    uint32_t billboardGroups(const RT64::VrBillboardGroup **groups) const override {
+        if (setting("billboard_facing") == 0.0) {
+            return 0;
+        }
+
+        *groups = BillboardGroups;
+        return uint32_t(sizeof(BillboardGroups) / sizeof(BillboardGroups[0]));
+    }
+
+    bool billboardViewpoint(uint32_t eye, float point[3]) override {
+        (void)eye;
+        if (!billboardPointValid) {
+            return false;
+        }
+
+        point[0] = billboardPoint.x;
+        point[1] = billboardPoint.y;
+        point[2] = billboardPoint.z;
+        return true;
+    }
+
     void eyeCamera(uint32_t eye, const float view[16], const float proj[16], float outView[16], float outProj[16]) override {
+        // The cinema leaves billboards facing the game camera (its views are the game camera's).
+        billboardPointValid = false;
+
         // RT64_VR_SAME_EYE=1: both eyes get the left eye's camera (diagnostics: equal images).
         static const bool sameEye = envFlag("RT64_VR_SAME_EYE", false);
         if (sameEye) {
@@ -673,6 +706,9 @@ public:
         }
 
         fromMat4(eyeView(gameView, eyeInHead[eye], float(setting("world_scale"))), outView);
+        // Billboards face the point between the eyes, from this same view.
+        billboardPoint = dk64vr::billboardViewpoint(gameView, eyeInHead[0], eyeInHead[1], float(setting("world_scale")));
+        billboardPointValid = true;
         const float nearUnits = float(setting("eye_near_m") * setting("world_scale"));
         const Mat4 projection = eyeProjection(eyeFov[eye], gameProj, nearUnits);
         fromMat4(projection, outProj);
@@ -3305,6 +3341,9 @@ private:
     Pose origin;
     bool recentrePending = true;
     Pose eyeInHead[2];
+    // The point camera-facing billboards face in this eye pass.
+    Vec3 billboardPoint;
+    bool billboardPointValid = false;
     Pose eyeSubmitPose[2];
     FovTangents eyeFov[2];
     XrFovf eyeXrFov[2] = {};

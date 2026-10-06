@@ -77,6 +77,14 @@ typedef enum interpolationIDs {
     MTXTAG_PAUSE_MAIN_AREYOUSURE = 0x403010,
 } interpolationIDs;
 
+// VR camera-facing billboards (only while VR is active): a flag above every id here on a
+// billboard's matrix group, so the renderer turns it to the viewer (src/vr/xr/xr_host.cpp,
+// BillboardGroups). Interpolation still pairs the same flagged id between frames.
+#define MTXTAG_VR_BILLBOARD_CYLINDRICAL 0x40000000
+#define MTXTAG_VR_BILLBOARD_SPHERICAL   0x80000000
+// Upright when the game built it upright (yaw only), else facing the viewer completely.
+#define MTXTAG_VR_BILLBOARD_MATCHING    0xC0000000
+
 typedef struct AnimationStateUnk0_0 {
     f32 unk0;
     u16 unk4;

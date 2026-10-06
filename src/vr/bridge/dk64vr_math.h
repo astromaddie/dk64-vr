@@ -136,6 +136,11 @@ Mat4 levelView(const Mat4 &view);
 // scaled from metres to game units. The game camera is the head origin.
 Mat4 eyeView(const Mat4 &gameView, const Pose &eyeInHead, float unitsPerMetre);
 
+// The point camera-facing billboards turn to in both eyes: midway between the eyes, through the
+// same game view as eyeView (so it moves exactly with the eye views). One point for both eyes keeps
+// each billboard a single flat card in stereo.
+Vec3 billboardViewpoint(const Mat4 &gameView, const Pose &leftEyeInHead, const Pose &rightEyeInHead, float unitsPerMetre);
+
 // z/w = A + B/d for a standard perspective projection (d = eye-space depth > 0). With a different
 // eye near plane, the game's fog (a function of z/w) needs the game's z/w for the same depth,
 // which is linear in the eye's: zw_game = a * zw_eye + b.

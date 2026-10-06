@@ -1,6 +1,7 @@
 #include "common_structs.h"
 #include "ui.h"
 #include "patches_ui.h"
+#include "vr_state.h"
 
 
 void setSpriteAlignment(u8 alignment) {
@@ -122,6 +123,11 @@ RECOMP_PATCH Gfx * func_global_asm_80715E94(Struct80717D84* sprite, Gfx *dl, s16
     temp_s0 = sprite->unk0[sprite->unk21++].unk0[D_global_asm_807444FC];
     // Mtx tag
     cur_drawn_model_transform_id = MTXTAG_SPRITE;
+    // @recomp: VR. World sprites built to face the camera (sparkles, smoke, dust) face the viewer;
+    // HUD sprites and ones with an authored world matrix (unk32C 3: ground rings, splashes) do not.
+    if (recomp_vr_is_active() && (raw_alignment == 0) && (sprite->unk32C != 3)) {
+        cur_drawn_model_transform_id |= MTXTAG_VR_BILLBOARD_MATCHING;
+    }
     cur_model_transform_id_offset = sprite->sprite_index;
     gSPMatrix(dl++, &identity_fixed_mtx, G_MTX_PUSH | G_MTX_MUL | G_MTX_MODELVIEW);
     cur_drawn_model_skip_interpolation = disable_sprite_interpolation;

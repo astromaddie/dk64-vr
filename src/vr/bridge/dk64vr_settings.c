@@ -64,6 +64,9 @@ static const sfvr_setting_key port_keys[] = {
 	// Drop the game camera's pitch and roll: level in the headset is level in the game, and
 	// the head supplies pitch.
 	{ "level_pitch", SFVR_SETTING_BOOL, 1.0, 0.0, 1.0, NULL },
+	// Camera-facing billboards the game tags (sprites, particles) face the point between the
+	// eyes instead of the flat game camera. 0 = as the game drew them.
+	{ "billboard_facing", SFVR_SETTING_BOOL, 1.0, 0.0, 1.0, NULL },
 	// The flat panel for menus, transitions and anything that is not 3D play: a world-locked
 	// quad over a black projection layer.
 	{ "panel_distance", SFVR_SETTING_FLOAT, 2.0, 0.8, 20.0, NULL },

@@ -484,6 +484,12 @@ Mat4 eyeView(const Mat4 &gameView, const Pose &eyeInHead, float unitsPerMetre) {
     return mul(gameView, rigidInverse(poseMatrix(eyeInHead, unitsPerMetre)));
 }
 
+Vec3 billboardViewpoint(const Mat4 &gameView, const Pose &leftEyeInHead, const Pose &rightEyeInHead, float unitsPerMetre) {
+    Pose centre = leftEyeInHead;
+    centre.p = { 0.5f * (leftEyeInHead.p.x + rightEyeInHead.p.x), 0.5f * (leftEyeInHead.p.y + rightEyeInHead.p.y), 0.5f * (leftEyeInHead.p.z + rightEyeInHead.p.z) };
+    return viewPosition(eyeView(gameView, centre, unitsPerMetre));
+}
+
 float depthToZw(const Mat4 &proj, float depth) {
     // A camera-space point at z = -depth.
     const float z = -depth;

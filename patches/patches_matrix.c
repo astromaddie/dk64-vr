@@ -843,6 +843,11 @@ RECOMP_PATCH Gfx *func_global_asm_80637B6C(Struct80635468_arg1 *arg0, Gfx *dl, f
         sp1AD = -1;
     }
     cur_drawn_model_transform_id = MTXTAG_PROPSPRITE + arg0->unk4C;
+    // @recomp: VR. Sprite props turn to the game camera's position; in the headset they face the
+    // viewer instead, upright when the game keeps them upright.
+    if (recomp_vr_is_active()) {
+        cur_drawn_model_transform_id |= MTXTAG_VR_BILLBOARD_MATCHING;
+    }
     cur_model_transform_id_offset = 0;
     gSPMatrix(dl++, &identity_fixed_mtx, G_MTX_PUSH | G_MTX_MUL | G_MTX_MODELVIEW);
     dl = set_model_matrix_group(dl, NULL, FALSE, &pushed_matrix_group);
