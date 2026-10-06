@@ -774,9 +774,10 @@ model: rows, focus, pointer, Defaults, scrolling, and the RML it writes; pure, h
 
 ## 10. Wear checklist (about 15 minutes)
 
-Build: branch `vr-polish`, installed as the `DK64VR` devkit title (binary md5
-`37767855d220d91ccbd351bfb64b8cba`, no diagnostics armed; the device's `vr.toml` has
-`resolution_scale = "auto"`, `snap_angle = 45`, foveation high eye-tracked, camera smoothing medium).
+Build: `steam-frame` d7da737 (polish, settings menu, world size and camera merged), installed as the
+`DK64VR` devkit title (binary md5 `21c0e5616ceb6ac9762dbb89ad200699`, no diagnostics armed; the
+device's `vr.toml` keeps the user's choices: smooth turning, world size DK 2.2 m, foveation high
+eye-tracked, camera smoothing medium, camera lower/closer 0).
 SteamVR per-app settings for DK64VR: 120 Hz (as the user set it). Launch from the Steam
 library (not SSH). Claim the Frame as `user-wearing`. Read the log afterwards with
 `tools/steam_frame/deploy.sh --logs` (FRAME_HOST=steamos@192.168.1.31).
@@ -809,6 +810,10 @@ library (not SSH). Claim the Frame as `user-wearing`. Read the log afterwards wi
    the bumpers, scroll Comfort with the right stick, try Defaults (it asks once). Close with B (or
    Menu + View again): the game carries on and the B press does not swing the camera. Is all text
    readable, and are the targets easy to hit?
+6c. World size and camera (2 min): in the quick menu, raise World size to Giant and close it: DK and
+   the world are much bigger around you, nothing near your face is cut away. In All VR settings >
+   Comfort, raise Lower camera and Camera closer: the view sits lower and nearer DK and follows him
+   smoothly; note any spot where the camera ends up inside a wall.
 7. Recentre and focus (1 min): turn your body 90 degrees and hold View 1 s: buzz, view recentred behind
    DK. Lift the headset off for a few seconds: on return the game should have waited.
 8. Answer: scale, HUD distance and size, snap angle, cinema distance and depth, any button that does
