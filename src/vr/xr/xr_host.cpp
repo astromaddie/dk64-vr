@@ -1795,11 +1795,15 @@ private:
 
             return;
         }
-        else if (menuPanel) {
+
+        if (menuPanel) {
             menuPanel = false;
             dk64vr_logf("menu panel: off");
         }
-        else if (setting("diag_force_stereo") != 0.0) {
+
+        // The menu-off branch used to be chained into this one, leaving `want` unset on the frame
+        // a recomp menu closed (found in the Banjo port).
+        if (setting("diag_force_stereo") != 0.0) {
             want = cameraSeen;
             why = "diag_force_stereo";
         }
