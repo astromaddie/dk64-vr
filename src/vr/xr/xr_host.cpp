@@ -991,17 +991,20 @@ public:
             layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&projection));
 
             // The transition fade and the pause dim: view-locked black over the world, under the
-            // panel.
+            // panel. SteamVR depth-composites quad layers (lesson 83), so with a panel up the dim
+            // sits beyond the panel (same angular size): at 0.3 m it covered the panel and the
+            // pointer (worn, the VR menu in play).
             stepFade();
             const int fadeLevel = int(std::lround(fadeAlpha * float(FadeLevels - 1)));
+            const bool panelShown = !stereoShown && !probing && (!frozen || pausePanel || menuPanel);
             if (uiReady && (fadeLevel > 0)) {
+                const float fadeDistance = panelShown ? (float(setting("panel_distance")) + 1.0f) : 0.3f;
                 Pose ahead;
-                ahead.p = { 0.0f, 0.0f, -0.3f };
-                fadeQuad = uiQuad(viewSpace, ahead, 96, 32, 3.0f, 3.0f, fadeLevel);
+                ahead.p = { 0.0f, 0.0f, -fadeDistance };
+                fadeQuad = uiQuad(viewSpace, ahead, 96, 32, 10.0f * fadeDistance, 10.0f * fadeDistance, fadeLevel);
                 layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&fadeQuad));
             }
 
-            const bool panelShown = !stereoShown && !probing && (!frozen || pausePanel || menuPanel);
             if (panelShown && panelReady.load()) {
                 const float width = float(setting("panel_width"));
                 const Pose panel = panelPose();
@@ -2400,6 +2403,7 @@ private:
 
         vrMenuOpen = true;
         vrMenuShown = true;
+        menuLayersLogS = 0.0;
         menuPointerDown = false;
         const dk64vr_game_state state = gameState();
         dk64vr_logf("menu: VR settings open (%s; scene %s, %s, head yaw %.0f deg)", why, sceneName(state.scene),
@@ -2450,6 +2454,12 @@ private:
 
         if (out.hover && s.valid) {
             sfvr_haptic_event(&input.haptics, dominantHand(), SFVR_HAPTIC_UI_HOVER);
+        }
+
+        // The real layer list while the menu is up, for worn logs: at open and every 2 s.
+        if ((displayS - menuLayersLogS) > 2.0) {
+            menuLayersLogS = displayS;
+            layersLogDue = true;
         }
 
         menuLast = out;
@@ -3353,6 +3363,7 @@ private:
     InputSample lastSample;
     menu::FrameOut menuLast;
     bool menuMissing = false;
+    double menuLayersLogS = 0.0;
     int recommendedEyeWidth = 0;
     bool settingsDirty = false;
     double settingsDirtyS = 0.0;

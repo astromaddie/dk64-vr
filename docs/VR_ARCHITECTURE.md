@@ -659,6 +659,12 @@ model: rows, focus, pointer, Defaults, scrolling, and the RML it writes; pure, h
 - RT64 presents in present-early mode, after the game's workloads; with the game paused there are
   none, so while the menu is open the host asks for a present on every VI tick
   (`VrHost::presentWithoutWorkloads`), and recompui keeps drawing.
+- SteamVR depth-composites quad layers (lesson 83), so the dim behind a panel over the frozen world
+  is a view-space quad beyond the panel (`panel_distance` + 1 m, same angular size), not at 0.3 m:
+  there it covered the panel and the pointer (first wear of the menu in play: "rendering behind the
+  3D world"). Transition fades without a panel stay at 0.3 m. `composite.py` composites quads by
+  depth like SteamVR (`--order submit` for submission order) and includes view-space quads. While
+  the menu is open the layers line is logged every 2 s, so a worn log shows the real layer list.
 - RmlUi does not clip some row controls (flex, rounded) to the list's `overflow: hidden`: the list
   scrolls by a negative margin and the title bar, list header and hint bar are opaque layers above
   it (z-index), which cover anything that escapes.

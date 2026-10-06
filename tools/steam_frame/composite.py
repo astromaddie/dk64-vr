@@ -4,7 +4,7 @@ Pillow). The game logs every layer's geometry (`[vr] layers: ...`, xr_host.cpp l
 each eye dump and every 2 s while panel dumps run; this draws, for one eye and in submission
 order, the projection layer (an eye dump), the panel quad (a panel dump; "panelpm" in the log is
 the VR menu's panel, blended with premultiplied alpha), the HUD quad (a HUD
-dump, unpremultiplied alpha) and the pointer's beam and dot (the static UI image, rebuilt here
+dump, unpremultiplied alpha), view-space quads (the fade) and the pointer's beam and dot (the static UI image, rebuilt here
 exactly as createUiImage makes it). It is a reconstruction for checking layer placement, order
 and alpha, not a capture of the compositor.
 
@@ -26,6 +26,20 @@ def qrot(q, v):
     x, y, z, w = q
     u = np.array([x, y, z])
     v = np.asarray(v, dtype=np.float64)
+    t = 2.0 * np.cross(u, v)
+    return v + w * t + np.cross(u, t)
+
+
+def qmul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz)
+
+
+def qrot_many(q, v):
+    x, y, z, w = q
+    u = np.array([x, y, z])
     t = 2.0 * np.cross(u, v)
     return v + w * t + np.cross(u, t)
 
@@ -67,7 +81,7 @@ def ui_image():
             u = (x - 64 + 0.5) / 32
             a = max(0.0, 1 - abs(u - 0.5) * 2)
             img[y, x] = [200, 235, 255, 255 * a * a * 0.9]
-        img[y, 96:128] = [0, 0, 0, 255]
+        img[y, 96:128] = [0, 0, 0, 255 * (y // 4) / 15]  # the fade and blink bands (FadeLevels 16)
     return img / 255.0
 
 
@@ -94,6 +108,8 @@ def main():
     ap.add_argument("--out", default="composite.png")
     ap.add_argument("--size", type=int, default=900)
     ap.add_argument("--tan", type=float, default=1.1, help="half-extent of the output view, as a tangent")
+    ap.add_argument("--order", choices=["depth", "submit"], default="depth",
+                    help="quad compositing: by distance per pixel, as SteamVR does (default), or in submission order")
     a = ap.parse_args()
 
     line, layers = parse_layers(Path(a.run) / "run-stdout.txt", a.layers)
@@ -105,13 +121,13 @@ def main():
     t = np.linspace(-a.tan, a.tan, n)
     tx, ty = np.meshgrid(t, -t)
     dirs_view = np.stack([tx, ty, -np.ones_like(tx)], axis=-1)
-    dirs = np.apply_along_axis(lambda d: qrot(view_q, d), -1, dirs_view.reshape(-1, 3)).reshape(n, n, 3)
+    dirs = qrot_many(view_q, dirs_view)
     out = np.zeros((n, n, 3))
 
     # The projection layer: the eye image through the view's own FOV.
     eye_img = load(a.eye_image) if a.eye_image else None
     l, r, u, d = proj["fov"]
-    loc = np.apply_along_axis(lambda v: qrot(qconj(view_q), v), -1, dirs.reshape(-1, 3)).reshape(n, n, 3)
+    loc = qrot_many(qconj(view_q), dirs)
     fx, fy = loc[..., 0] / -loc[..., 2], loc[..., 1] / -loc[..., 2]
     tl, tr, tu, td = math.tan(l), math.tan(r), math.tan(u), math.tan(d)
     inside = (loc[..., 2] < 0) & (fx >= tl) & (fx <= tr) & (fy <= tu) & (fy >= td)
@@ -122,10 +138,19 @@ def main():
         out[inside] = [0.2, 0.25, 0.3]
 
     images = {"panel": load(a.panel) if a.panel else None, "hud": load(a.hud) if a.hud else None, "ui": ui_image()}
-    for q in [l for l in layers if l["kind"] == "quad" and not l["name"].endswith("@view")]:
+    # The view space (quads marked @view) is the head: between the two eyes, with the eye's
+    # orientation.
+    projs = [l for l in layers if l["kind"] == "proj"]
+    head_p = np.mean([np.array(l["p"]) for l in projs], axis=0)
+    drawn = []  # (distance per pixel, mask, rgb, alpha, premultiplied)
+    for q in [l for l in layers if l["kind"] == "quad"]:
+        name = q["name"].split("@")[0]
         qq = tuple(q["q"])
-        normal = qrot(qq, [0, 0, 1])
         centre = np.array(q["p"])
+        if q["name"].endswith("@view"):
+            qq = qmul(view_q, qq)
+            centre = head_p + qrot(view_q, centre)
+        normal = qrot(qq, [0, 0, 1])
         denom = dirs @ normal
         dist = ((centre - eye_pos) @ normal) / np.where(np.abs(denom) < 1e-9, 1e-9, denom)
         hit = eye_pos + dirs * dist[..., None]
@@ -136,23 +161,41 @@ def main():
         on = (dist > 0) & (np.abs(x) <= w / 2) & (np.abs(y) <= h / 2)
         if not on.any():
             continue
-        # "panelpm": the panel blended with premultiplied alpha (the VR settings menu, which
-        # floats over the world); "panel" is opaque.
-        img = images.get("panel" if q["name"] == "panelpm" else q["name"])
+        img = images.get("panel" if name == "panelpm" else name)
+        rgb = np.zeros((n, n, 3))
+        alpha = np.zeros((n, n, 1))
         if img is None:
             # No image for this layer: draw only its outline (1 px), so the placement shows
             # without tinting what lies under it.
-            print(f"note: no image for the {q['name']} layer; drawn as an outline only")
+            print(f"note: no image for the {name} layer; drawn as an outline only")
             px_w = 2 * a.tan / n
-            edge = on & ((np.abs(np.abs(x) - w / 2) < px_w * dist) | (np.abs(np.abs(y) - h / 2) < px_w * dist))
-            out[edge] = [1.0, 0.0, 1.0]
+            on = on & ((np.abs(np.abs(x) - w / 2) < px_w * dist) | (np.abs(np.abs(y) - h / 2) < px_w * dist))
+            rgb[on] = [1.0, 0.0, 1.0]
+            alpha[on] = 1.0
+            drawn.append((dist, on, rgb, alpha, False))
             continue
         px = sample(img, q["rect"], x[on] / w + 0.5, 0.5 - y[on] / h)
-        if q["name"] == "panelpm":
-            out[on] = px[:, :3] + out[on] * (1 - px[:, 3:4])
-            continue
-        alpha = px[:, 3:4] if q["name"] != "panel" else 1.0
-        out[on] = px[:, :3] * alpha + out[on] * (1 - alpha)
+        rgb[on] = px[:, :3]
+        alpha[on] = px[:, 3:4] if name != "panel" else 1.0
+        # "panelpm": the panel blended with premultiplied alpha (the VR settings menu, which
+        # floats over the world); "panel" is opaque.
+        drawn.append((dist, on, rgb, alpha, name == "panelpm"))
+
+    # SteamVR depth-composites quad layers (lesson 83): per pixel, the farthest first. With
+    # --order submit they go in submission order instead.
+    if drawn:
+        dists = np.stack([np.where(d[1], d[0], -np.inf) for d in drawn])  # (L, n, n)
+        order = np.argsort(-dists, axis=0) if a.order == "depth" else np.broadcast_to(np.arange(len(drawn))[:, None, None], dists.shape)
+        for k in range(len(drawn)):
+            idx = order[k]
+            for li, (dist, on, rgb, alpha, pm) in enumerate(drawn):
+                m = on & (idx == li)
+                if not m.any():
+                    continue
+                if pm:
+                    out[m] = rgb[m] + out[m] * (1 - alpha[m])
+                else:
+                    out[m] = rgb[m] * alpha[m] + out[m] * (1 - alpha[m])
 
     Image.fromarray((np.clip(out, 0, 1) * 255).astype(np.uint8)).save(a.out)
     print(f"{a.out}: eye {a.eye}, {len(layers)} layer entries from: {line[:120]}...")
