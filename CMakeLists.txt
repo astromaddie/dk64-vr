@@ -400,6 +400,8 @@ if (DK64_VR)
         ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_settings.c
         ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_log.c
         ${CMAKE_SOURCE_DIR}/src/vr/bridge/dk64vr_input.cpp
+        ${CMAKE_SOURCE_DIR}/src/vr/menu/dk64vr_menu.cpp
+        ${CMAKE_SOURCE_DIR}/src/vr/menu/dk64vr_menu_ui.cpp
         ${CMAKE_SOURCE_DIR}/src/vr/xr/xr_host.cpp
         ${CMAKE_SOURCE_DIR}/src/vr/xr/xr_foveation.cpp
         ${CMAKE_SOURCE_DIR}/src/vr/xr/xr_input.cpp

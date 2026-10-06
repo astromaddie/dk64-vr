@@ -167,16 +167,151 @@ bool triggerClick(bool wasDown, float value) {
     return wasDown ? (value > 0.45f) : (value >= 0.6f);
 }
 
+void SystemChord::reset() {
+    *this = SystemChord();
+}
+
+SystemChord::Out SystemChord::update(bool menu, bool view, double nowS, const ChordConfig &config) {
+    Out o;
+    const bool menuPressed = menu && !prevMenu;
+    if (view && !prevView) {
+        viewDownS = nowS;
+    }
+
+    prevMenu = menu;
+    prevView = view;
+    const bool viewFresh = view && ((nowS - viewDownS) < config.viewJoin);
+    const auto startChord = [&]() {
+        mode = Chord;
+        chordS = nowS;
+        o.cancelView = true;
+    };
+
+    switch (mode) {
+        case Swallow:
+            if (!menu && !view) {
+                mode = Idle;
+            }
+            break;
+        case Chord:
+            if (!menu || !view) {
+                mode = (!menu && !view) ? Idle : Swallow;  // let go early: nothing, until both are up
+            }
+            else if ((nowS - chordS) >= config.hold) {
+                o.fired = true;
+                mode = Swallow;
+            }
+            break;
+        case Idle:
+            if (menuPressed && viewFresh) {
+                startChord();
+            }
+            else if (menuPressed && view) {
+                mode = MenuPass;  // View held past the join window: two separate actions
+                o.menu = true;
+                o.view = true;
+            }
+            else if (menuPressed) {
+                mode = MenuWait;
+                menuDownS = nowS;
+                o.view = view;
+            }
+            else {
+                o.view = view;
+            }
+            break;
+        case MenuWait:
+            if (!menu) {
+                pulseUntilS = nowS + config.startPulse;  // a tap: Start for a moment, now
+                mode = Idle;
+                o.view = view;
+            }
+            else if (view) {
+                startChord();
+            }
+            else if ((nowS - menuDownS) >= config.grace) {
+                mode = MenuPass;
+                o.menu = true;
+            }
+            break;
+        case MenuPass:
+            o.menu = menu;
+            o.view = view;
+            if (!menu) {
+                mode = Idle;
+            }
+            break;
+    }
+
+    if (nowS < pulseUntilS) {
+        o.menu = true;
+    }
+
+    return o;
+}
+
+namespace {
+
+// Raw button bits for InputMapper::ignoreHeld.
+uint32_t heldBits(const InputSample &s) {
+    uint32_t b = 0;
+    const bool held[] = { s.a, s.b, s.x, s.y, s.menu, s.view, s.lBumper, s.rBumper, s.lStickClick, s.rStickClick,
+        s.dpadUp, s.dpadDown, s.dpadLeft, s.dpadRight, s.lTrigger > TriggerOff, s.rTrigger > TriggerOff };
+    for (size_t i = 0; i < sizeof(held) / sizeof(held[0]); i++) {
+        b |= held[i] ? (1u << i) : 0u;
+    }
+
+    return b;
+}
+
+void clearBits(InputSample &s, uint32_t bits) {
+    bool *flags[] = { &s.a, &s.b, &s.x, &s.y, &s.menu, &s.view, &s.lBumper, &s.rBumper, &s.lStickClick, &s.rStickClick,
+        &s.dpadUp, &s.dpadDown, &s.dpadLeft, &s.dpadRight };
+    for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
+        if (bits & (1u << i)) {
+            *flags[i] = false;
+        }
+    }
+
+    if (bits & (1u << 14)) {
+        s.lTrigger = 0.0f;
+    }
+
+    if (bits & (1u << 15)) {
+        s.rTrigger = 0.0f;
+    }
+}
+
+}
+
 void InputMapper::reset() {
     *this = InputMapper();
 }
 
-InputResult InputMapper::update(const InputSample &s, const InputConfig &config, const InputContext &context, double nowS, float dtS) {
+void InputMapper::ignoreHeld(const InputSample &s) {
+    ignored |= heldBits(s);
+}
+
+InputResult InputMapper::update(const InputSample &raw, const InputConfig &config, const InputContext &context, double nowS, float dtS) {
     InputResult r;
-    if (!s.valid) {
+    if (!raw.valid) {
         // Focus lost or no actions: every input released, a held View press is cancelled.
         reset();
         return r;
+    }
+
+    InputSample s = raw;
+    ignored &= heldBits(raw);
+    clearBits(s, ignored);
+
+    // The Menu + View chord first, so neither button acts while it may still form.
+    const SystemChord::Out chordOut = chord.update(s.menu, s.view, nowS);
+    s.menu = chordOut.menu;
+    s.view = chordOut.view;
+    r.vrMenuChord = chordOut.fired;
+    if (chordOut.cancelView) {
+        view = ViewState();  // the press is forgotten; the machine waits for a fresh one
+        toggleReads = 0;
     }
 
     // System layer: View short press opens or closes the recomp menu (DK64 Recompiled's Back);

@@ -16,6 +16,7 @@
 //   R stick Y  nothing in VR (the game's default puts C-up/C-down there; mode switches on stick
 //              flicks were rejected in Lambda1VR, lesson 80; RB and LB still do them)
 //   View    short: the recomp menu (DK64 Recompiled's Back); hold 1 s: recentre
+//   Menu + View held 0.5 s: the VR settings menu (SystemChord)
 #pragma once
 
 #include <cstdint>
@@ -135,12 +136,53 @@ struct InputResult {
     float turnDeg = 0.0f;     // comfort turn this frame, positive = right (clockwise from above)
     bool recentre = false;    // View held 1 s (or 3 s: recentre again; no standing height here)
     bool systemBuzz = false;  // the standard's 0.6/80 ms buzz on both hands
+    bool vrMenuChord = false; // Menu + View held 0.5 s: open or close the VR settings menu
+};
+
+// Menu + View held together for 0.5 s opens the VR settings menu (standard.md section 1, for a
+// game whose pause menu cannot take a "VR settings" item). The chord is resolved before either
+// button acts on its own:
+//  - Menu down alone holds Start back for `grace` (0.15 s). View joining in that time makes the
+//    chord; otherwise Start passes from then on, or, for a tap shorter than the grace, as a
+//    pulse of `startPulse` after the release (long enough for the game's 20-30 Hz input poll).
+//  - View down alone passes to its own state machine (short press on release, recentre at 1 s),
+//    which fires nothing while the button is held. Menu joining within `viewJoin` (0.9 s, before
+//    the recentre) makes the chord and cancels the View press (`cancelView`) without an event.
+//  - Once both are down nothing passes, whether the chord completes or one button is let go
+//    early, until both are released. The same holds for anything already down after a reset.
+struct ChordConfig {
+    double grace = 0.15;
+    double hold = 0.5;
+    double startPulse = 0.12;
+    double viewJoin = 0.9;
+};
+
+class SystemChord {
+public:
+    struct Out {
+        bool menu = false;        // the Menu level the rest of the mapper sees (Start, Apply)
+        bool view = false;        // the View level the View state machine sees
+        bool fired = false;       // the chord completed this update
+        bool cancelView = false;  // forget the View press in progress (no event)
+    };
+
+    void reset();
+    Out update(bool menu, bool view, double nowS, const ChordConfig &config = ChordConfig());
+
+private:
+    enum Mode { Swallow = 0, Idle, MenuWait, MenuPass, Chord };
+    int mode = Swallow;  // zero-initialised: buttons already down are ignored until released
+    double menuDownS = 0.0, chordS = 0.0, viewDownS = 0.0, pulseUntilS = -1.0;
+    bool prevMenu = false, prevView = false;
 };
 
 class InputMapper {
 public:
     void reset();
     InputResult update(const InputSample &s, const InputConfig &config, const InputContext &context, double nowS, float dtS);
+    // Buttons down now are ignored until each is released (after a menu closes, so the B or View
+    // press that closed it never reaches the game).
+    void ignoreHeld(const InputSample &s);
 
 private:
     struct ViewState {
@@ -149,6 +191,8 @@ private:
         int recentred = 0;
         int recalibrated = 0;
     } view;
+    SystemChord chord;
+    uint32_t ignored = 0;  // raw button bits (see heldBits) waiting for their release
     int toggleReads = 0;  // frames left to hold ToggleMenu after a View short press
     int turnDisarmed = 0;
     bool zHeld = false, rHeld = false;

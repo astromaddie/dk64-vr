@@ -2,7 +2,8 @@
 """Rebuild what SteamVR composites for one eye from an unattended run's dumps (needs numpy and
 Pillow). The game logs every layer's geometry (`[vr] layers: ...`, xr_host.cpp logLayers) with
 each eye dump and every 2 s while panel dumps run; this draws, for one eye and in submission
-order, the projection layer (an eye dump), the panel quad (a panel dump), the HUD quad (a HUD
+order, the projection layer (an eye dump), the panel quad (a panel dump; "panelpm" in the log is
+the VR menu's panel, blended with premultiplied alpha), the HUD quad (a HUD
 dump, unpremultiplied alpha) and the pointer's beam and dot (the static UI image, rebuilt here
 exactly as createUiImage makes it). It is a reconstruction for checking layer placement, order
 and alpha, not a capture of the compositor.
@@ -135,7 +136,9 @@ def main():
         on = (dist > 0) & (np.abs(x) <= w / 2) & (np.abs(y) <= h / 2)
         if not on.any():
             continue
-        img = images.get(q["name"])
+        # "panelpm": the panel blended with premultiplied alpha (the VR settings menu, which
+        # floats over the world); "panel" is opaque.
+        img = images.get("panel" if q["name"] == "panelpm" else q["name"])
         if img is None:
             # No image for this layer: draw only its outline (1 px), so the placement shows
             # without tinting what lies under it.
@@ -145,6 +148,9 @@ def main():
             out[edge] = [1.0, 0.0, 1.0]
             continue
         px = sample(img, q["rect"], x[on] / w + 0.5, 0.5 - y[on] / h)
+        if q["name"] == "panelpm":
+            out[on] = px[:, :3] + out[on] * (1 - px[:, 3:4])
+            continue
         alpha = px[:, 3:4] if q["name"] != "panel" else 1.0
         out[on] = px[:, :3] * alpha + out[on] * (1 - alpha)
 

@@ -19,6 +19,9 @@ public:
         VkDeviceCreateInfo &prepared, FoveationLevel level, bool valveDisabled);
     void deviceCreated(plume::VulkanDevice *device);
     bool enabled() const { return active && !failed; }
+    // The level of an attachment that came up at launch can change at any time (the map is
+    // rebuilt every frame); Off is the host not asking for a companion at all.
+    void setLevel(FoveationLevel next) { if (active && next != FoveationLevel::Off) level = next; }
     // Called only for the main gameplay eye raster. Map upload completes in this
     // command list before the companion framebuffer is bound. No readback/wait.
     plume::RenderFramebuffer *framebuffer(uint32_t eye, plume::RenderCommandList *commands,

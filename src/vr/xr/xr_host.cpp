@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -41,6 +42,7 @@
 #include "dk64vr_settings.h"
 #include "sfvr/sfvr_perf.h"
 #include "../diag/dk64vr_diag.h"
+#include "../menu/dk64vr_menu_ui.h"
 #include "xr_input.h"
 #include "xr_foveation.h"
 
@@ -291,6 +293,7 @@ public:
 
     void shutdown() {
         watchdogStop();
+        stopSaver();
         RT64::SetVrHost(nullptr);
         if (instance != XR_NULL_HANDLE) {
             xrDestroyInstance(instance);
@@ -460,7 +463,8 @@ public:
         synthetic = forceRender && !frameState.shouldRender;
         eyesRecorded[0] = eyesRecorded[1] = false;
         foveatedEye[0] = foveatedEye[1] = false;
-        setPaused(!forceRender && !(focused && frameState.shouldRender), focused ? "headset in standby" : "focus lost");
+        const bool standby = !forceRender && !(focused && frameState.shouldRender);
+        setPaused(standby || vrMenuOpen, standby ? (focused ? "headset in standby" : "focus lost") : "VR settings menu");
         checkDiagExit();
         if (!rendering) {
             updateInput(false);
@@ -766,9 +770,13 @@ public:
 
     plume::RenderFramebuffer *foveatedFramebuffer(uint32_t eye, plume::RenderCommandList *commands, plume::RenderFramebuffer *framebuffer) override {
         if (eye >= 2 || cinemaActive || frameMode != RT64::VrFrame::Mode::Stereo || !foveation.enabled()) return framebuffer;
+        // The level follows the setting at once (the VR menu); off is no attachment at all.
+        const int level = int(setting("foveation"));
+        if (level == 0) return framebuffer;
+        foveation.setLevel(FoveationLevel(level));
         FoveationCentre centre = projectionCentre(eyeFov[eye]);
         Pose gaze;
-        const bool tracked = haveEyeGaze && runtimeEyesValid && !synthetic && input.gazePose(gaze);
+        const bool tracked = haveEyeGaze && (setting("foveation_eye_tracked") != 0.0) && runtimeEyesValid && !synthetic && input.gazePose(gaze);
         if (tracked) {
             const Quat rotation = quatMul(quatConj(runtimeEyePose[eye].q), gaze.q);
             centre = gazeCentre(eyeFov[eye], quatRotate(rotation, { 0, 0, -1 }));
@@ -999,6 +1007,7 @@ public:
                 const Pose panel = panelPose();
                 quad.space = localSpace;
                 quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quad.layerFlags = panelImageUiOnly.load() ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0;
                 quad.subImage.swapchain = panelChain.handle;
                 quad.subImage.imageRect.offset = { 0, 0 };
                 quad.subImage.imageRect.extent = { int32_t(panelChain.width), int32_t(panelChain.height) };
@@ -1137,6 +1146,10 @@ public:
         }
 
         panelChain.acquired = true;
+        // The VR menu floats over the frozen world: only recompui's draw, over transparent black
+        // (blended by the panel layer, premultiplied). Latched per image so the layer's blend
+        // always matches the image it shows.
+        panelAcquiredUiOnly = vrMenuShown.load();
         plume::VulkanTexture *image = panelChain.textures[panelChain.index].get();
         image->textureLayout = plume::RenderTextureLayout::COLOR_WRITE;
         image->barrierStages = plume::RenderBarrierStage::GRAPHICS;
@@ -1146,6 +1159,10 @@ public:
         return panelChain.framebuffers[panelChain.index].get();
     }
 
+    bool panelUiOnly() override {
+        return panelAcquiredUiOnly;
+    }
+
     void panelRelease() override {
         if (!panelChain.acquired) {
             panelMutex.unlock();
@@ -1153,6 +1170,22 @@ public:
         }
 
         panelPresents++;
+        // The VR menu tour's dumps (with alpha: the window over transparent black).
+        const int menuDump = menuPanelDump.exchange(-1);
+        if ((menuDump >= 0) && panelWorker) {
+            plume::VulkanTexture *image = panelChain.textures[panelChain.index].get();
+            panelWorker->commandList->begin();
+            panelReadback.keepAlpha = true;
+            recordReadback(panelWorker->commandList.get(), image, panelChain, panelReadback, "vr-menu-" + menuDumpName, menuDump);
+            panelWorker->commandList->barriers(plume::RenderBarrierStage::GRAPHICS, plume::RenderTextureBarrier(image, plume::RenderTextureLayout::COLOR_WRITE));
+            panelWorker->commandList->end();
+            panelWorker->execute();
+            panelWorker->wait();
+            finishReadback(panelReadback);
+            panelReadback.keepAlpha = false;
+            layersLogDue = true;
+            dk64vr_logf("menu: dump %d %s (ui only %d)", menuDump, menuDumpName.c_str(), int(panelAcquiredUiOnly));
+        }
         // Every dump_panel_frame-th present, up to 40, for a timeline of the flat screens.
         const uint64_t dumpPanel = uint64_t(setting("dump_panel_frame"));
         if ((dumpPanel > 0) && ((panelPresents % dumpPanel) == 0) && (panelPresents / dumpPanel <= 40) && panelWorker) {
@@ -1173,8 +1206,14 @@ public:
         }
 
         panelChain.acquired = false;
+        panelImageUiOnly = panelAcquiredUiOnly;
         panelReady = true;
         panelMutex.unlock();
+    }
+
+    // UI thread (the launcher's init callback): the VR settings menu's document.
+    void uiInit() {
+        menu::uiCreate();
     }
 
     // Game thread: the game's Rumble Pak motor (ultramodern's set_rumble), as haptics.
@@ -1281,6 +1320,7 @@ private:
         // resolution moves the recommendation); a number multiplies the recommendation.
         const double scale = setting("resolution_scale");
         const uint32_t recommended[2] = { configViews[0].recommendedImageRectWidth, configViews[0].recommendedImageRectHeight };
+        recommendedEyeWidth = int(recommended[0]);
         const uint32_t maximum[2] = { configViews[0].maxImageRectWidth, configViews[0].maxImageRectHeight };
         const EyeSize chosen = dk64vr::eyeSize(recommended[0], recommended[1], maximum[0], maximum[1], scale);
         const uint32_t eyeSize[2] = { chosen.width, chosen.height };
@@ -1307,7 +1347,7 @@ private:
 
         // RT64's main color image is RGBA8 UNORM holding gamma-encoded colour: copied raw into an
         // sRGB image it is decoded once by the compositor (lessons 8, 42).
-        const bool dumps = (setting("dump_frame") > 0.0) || (setting("dump_panel_frame") > 0.0);
+        const bool dumps = (setting("dump_frame") > 0.0) || (setting("dump_panel_frame") > 0.0) || (setting("diag_vr_menu_at") > 0.0);
         if (has(VK_FORMAT_R8G8B8A8_SRGB)) {
             for (int eye = 0; eye < 2; eye++) {
                 createSwapchain(eyeChain[eye], eyeSize[0], eyeSize[1], VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, plume::RenderFormat::R8G8B8A8_UNORM, false, dumps);
@@ -1655,6 +1695,7 @@ private:
                 origin.q = quatFromYaw(quatYaw(headPose.q));
                 origin.p = headPose.p;
                 cinemaAnchored = false;
+                panelYawRad = 0.0f;
                 dk64vr_logf("recentre: head yaw %.1f deg, at %.2f %.2f %.2f m", quatYaw(headPose.q) * 180.0f / 3.1415926f, headPose.p.x, headPose.p.y, headPose.p.z);
             }
 
@@ -1673,7 +1714,10 @@ private:
             eyeSubmitPose[eye] = poseMul(origin, eyeInHead[eye]);
         }
 
-        dumpDue = (nextDumpFrame > 0) && (dumpsDone < uint64_t(setting("dump_count"))) && (stereoFrames + 1 >= nextDumpFrame);
+        dumpDue = ((nextDumpFrame > 0) && (dumpsDone < uint64_t(setting("dump_count"))) && (stereoFrames + 1 >= nextDumpFrame)) || (menuEyeDump && stereoLatched && !frozen && !probing);
+        if (dumpDue && menuEyeDump) {
+            menuEyeDump = false;
+        }
         if (dumpDue) {
             hudDumpDue = true;  // with the next HUD image
             hudDumpIndex = dumpsDone;
@@ -2077,6 +2121,17 @@ private:
                 (setting("right_stick_x") != 0.0) ? "camera" : "turn", int(setting("turn_mode")), int(setting("snap_angle")), int(setting("move_from_view")));
         }
 
+        lastSample = s;
+        if (r.vrMenuChord) {
+            sfvr_haptic_event(&input.haptics, SFVR_HAND_BOTH, SFVR_HAPTIC_UI_CLICK);
+            if (vrMenuOpen) {
+                closeVrMenu("Menu + View");
+            }
+            else {
+                openVrMenu(r.navHeld, "Menu + View");
+            }
+        }
+
         if (r.recentre) {
             recentrePending = true;
             dk64vr_logf("recentre: View held");
@@ -2102,8 +2157,19 @@ private:
             navHeld |= nav::ToggleMenu;
         }
 
-        sendNav(navHeld);
+        diagVrMenu(sinceStart);
+        // While the VR menu is open it takes the pad and the pointer itself; recompui's own
+        // menus (perhaps open under it) get nothing.
+        sendNav(vrMenuOpen ? 0u : navHeld);
         updatePointer(s);
+        if (vrMenuOpen) {
+            feedVrMenu(s, navHeld);
+        }
+
+        if (settingsDirty && ((displayS - settingsDirtyS) > 0.5)) {
+            requestSettingsSave();
+        }
+
         diagSnap();
         if ((setting("diag_hud_seconds") > 0.0) && stereoLatched && (state.scene == DK64VR_SCENE_GAMEPLAY) && (displayS >= diagHudNextS)) {
             if (diagHudNextS > 0.0) {
@@ -2296,23 +2362,318 @@ private:
         navHeldLast = held;
     }
 
+    // ----------------------------------------------------------------------------------------
+    // The VR settings menu (src/vr/menu, docs section 9a): Menu + View held 0.5 s. The game
+    // pauses while it is open (setPaused), a stereo world freezes dimmed behind it (the recomp
+    // menu path in updateStereoLatch: its context captures input), and the panel turns to face
+    // the head and shows only the menu, over transparent black.
+
+    menu::Facts menuFacts() const {
+        menu::Facts f;
+        f.displayHz = (periodS > 0.0) ? (1.0 / periodS) : 0.0;
+        f.recommendedEye = recommendedEyeWidth;
+        f.foveationLive = foveation.enabled();
+        return f;
+    }
+
+    void openVrMenu(uint32_t navHeld, const char *why) {
+        if (vrMenuOpen) {
+            return;
+        }
+
+        if (!menu::uiReady()) {
+            logOnce(menuMissing, "menu: the VR settings document is not loaded; Menu + View does nothing");
+            return;
+        }
+
+        panelYawRad = quatYaw(headInOriginQ);  // placed in front of the head (standard.md section 3)
+        if (!menu::uiOpen(settings, menuFacts(), displayS, navHeld)) {
+            panelYawRad = 0.0f;
+            return;
+        }
+
+        vrMenuOpen = true;
+        vrMenuShown = true;
+        menuPointerDown = false;
+        const dk64vr_game_state state = gameState();
+        dk64vr_logf("menu: VR settings open (%s; scene %s, %s, head yaw %.0f deg)", why, sceneName(state.scene),
+            stereoLatched ? "stereo: world frozen behind it" : "panel", panelYawRad * 180.0f / 3.1415926f);
+    }
+
+    void closeVrMenu(const char *why) {
+        if (!vrMenuOpen) {
+            return;
+        }
+
+        menu::uiClose();
+        vrMenuOpen = false;
+        vrMenuShown = false;
+        panelYawRad = 0.0f;
+        menuPointerDown = false;
+        mapper.ignoreHeld(lastSample);  // the B, View or chord press that closed it stays out of the game
+        if (settingsDirty) {
+            requestSettingsSave();
+        }
+
+        dk64vr_logf("menu: VR settings closed (%s)", why);
+    }
+
+    void feedVrMenu(const InputSample &s, uint32_t navHeld) {
+        menu::FrameIn in;
+        in.nowS = displayS;
+        in.navHeld = navHeld | diagMenuNav;
+        in.scroll = s.valid ? s.rStick[1] : 0.0f;
+        in.pointerOn = menuPointerOn;
+        in.pointerDown = menuPointerDown;
+        in.px = menuPointerX;
+        in.py = menuPointerY;
+        menu::uiFrame(in, menuFacts());
+        menu::FrameOut out = menu::uiTake();
+        for (const menu::StructSettings::Change &c : out.changes) {
+            dk64vr_settings_set(&settings, c.key.c_str(), c.value);
+            dk64vr_logf("menu: %s = %g", c.key.c_str(), dk64vr_settings_get(&settings, c.key.c_str()));
+            settingsDirty = true;
+            settingsDirtyS = displayS;
+        }
+
+        if (out.recentre) {
+            recentrePending = true;
+            sfvr_haptic_event(&input.haptics, SFVR_HAND_BOTH, SFVR_HAPTIC_SYSTEM);
+            dk64vr_logf("recentre: VR menu");
+        }
+
+        if (out.hover && s.valid) {
+            sfvr_haptic_event(&input.haptics, dominantHand(), SFVR_HAPTIC_UI_HOVER);
+        }
+
+        menuLast = out;
+        if (out.close) {
+            closeVrMenu("closed in the menu");
+        }
+    }
+
+    // vr.toml is written on its own thread (an fsync never stalls a display frame), half a second
+    // after the last change and when the menu closes.
+    void requestSettingsSave() {
+        settingsDirty = false;
+        {
+            std::scoped_lock lock(saverMutex);
+            saverCopy = settings;
+            saverPending = true;
+            if (!saverThread.joinable()) {
+                saverThread = std::thread([this]() { saverLoop(); });
+            }
+        }
+
+        saverCv.notify_one();
+    }
+
+    void saverLoop() {
+        std::unique_lock lock(saverMutex);
+        while (true) {
+            saverCv.wait(lock, [this]() { return saverPending || saverStop; });
+            if (saverPending) {
+                const dk64vr_settings_t copy = saverCopy;
+                saverPending = false;
+                lock.unlock();
+                const bool ok = dk64vr_settings_save(&copy);
+                dk64vr_logf("settings: %s %s", ok ? "saved" : "could not save", copy.path);
+                lock.lock();
+                continue;
+            }
+
+            break;
+        }
+    }
+
+    void stopSaver() {
+        if (settingsDirty) {
+            requestSettingsSave();
+        }
+
+        {
+            std::scoped_lock lock(saverMutex);
+            saverStop = true;
+        }
+
+        saverCv.notify_one();
+        if (saverThread.joinable()) {
+            saverThread.join();
+        }
+    }
+
+    // Diagnostic (diag_vr_menu_at): a tour of the menu without a wearer, each step's panel dumped
+    // with a layers line (and the stereo eyes once, just before it opens, for composites). Pad
+    // presses and the pointer (aimed at an element the document reports, and one click) go
+    // through the same paths as a wearer's. It never changes a setting: no Left/Right, and
+    // Defaults is only armed.
+    struct TourStep {
+        const char *name;
+        uint32_t nav;         // pressed at the step's start
+        int extraDowns;       // more Down presses, 0.3 s apart
+        const char *pointAt;  // the pointer aims at this data-act's centre ("" none)
+        bool click;           // trigger at 40% of the step
+        const char *act;      // run as a click would, at the start
+    };
+
+    void diagVrMenu(double sinceStart) {
+        diagMenuNav = 0;
+        diagPointerDown = false;
+        const double at = setting("diag_vr_menu_at");
+        if ((at <= 0.0) || tourDone) {
+            diagPointerU = -1.0f;
+            return;
+        }
+
+        static const TourStep fullTour[] = {
+            { "c-open", 0, 0, "", false, nullptr },
+            { "c-pad", nav::Down, 0, "", false, nullptr },
+            { "c-pointer", 0, 0, "set:turn_mode:1", false, nullptr },
+            { "b-comfort", 0, 0, "all", true, nullptr },
+            { "b-controls", nav::TabRight, 0, "", false, nullptr },
+            { "b-hud", nav::TabRight, 0, "", false, nullptr },
+            { "b-display", nav::TabRight, 0, "", false, nullptr },
+            { "b-room", nav::TabRight, 0, "", false, nullptr },
+            { "b-focus", nav::TabRight, 3, "", false, nullptr },
+            { "b-scroll", nav::Down, 5, "", false, nullptr },
+            { "b-pointer", 0, 0, "def", false, nullptr },
+            { "b-armed", 0, 0, "", false, "def" },
+            { "c-back", nav::Back, 0, "", false, nullptr },
+            { "closed", nav::Back, 0, "", false, nullptr },
+        };
+        const int tabOnly = int(setting("diag_vr_menu_tab"));
+        static const char *const tabActs[] = { "tab:0", "tab:1", "tab:2", "tab:3", "tab:4" };
+        const TourStep tabTour[] = {
+            { "c-open", 0, 0, "", false, nullptr },
+            { "b-tab", 0, 0, "", false, (tabOnly >= 0 && tabOnly <= 4) ? tabActs[tabOnly] : "tab:0" },
+        };
+        const TourStep *steps = (tabOnly >= 0) ? tabTour : fullTour;
+        const int count = (tabOnly >= 0) ? 2 : int(sizeof(fullTour) / sizeof(fullTour[0]));
+
+        if (tourStep < 0) {
+            // In stereo play if the run gets there within a minute, so the frozen world shows.
+            if ((sinceStart < at) || (!stereoLatched && (sinceStart < at + 60.0))) {
+                return;
+            }
+
+            if (stereoLatched && !menuEyeDumpAsked) {
+                menuEyeDumpAsked = true;
+                menuEyeDump = true;  // the world as it will freeze, for composites
+                tourStepS = displayS;
+                return;
+            }
+
+            if (menuEyeDumpAsked && (displayS - tourStepS) < 0.3) {
+                return;
+            }
+
+            tourStep = 0;
+            tourStepS = displayS;
+            tourActed = false;
+            dk64vr_logf("diag menu: tour begins (%s, %d steps)", stereoLatched ? "stereo play" : "panel", count);
+        }
+
+        const double stepLen = std::max(1.0, setting("diag_vr_menu_step"));
+        double t = displayS - tourStepS;
+        if (t >= stepLen) {
+            if (tourStep + 1 >= count) {
+                if (tabOnly < 0) {
+                    tourDone = true;
+                    diagPointerU = -1.0f;
+                    menu::uiLocate("");
+                    dk64vr_logf("diag menu: tour done (menu %s)", vrMenuOpen ? "still open" : "closed");
+                }
+                return;  // the tab view stays up for the rest of the run
+            }
+
+            tourStep++;
+            tourStepS = displayS;
+            tourActed = false;
+            t = 0.0;
+        }
+
+        const TourStep &step = steps[tourStep];
+        if (!tourActed) {
+            tourActed = true;
+            if (tourStep == 0) {
+                openVrMenu(0, "diagnostic tour");
+            }
+
+            if (step.act != nullptr) {
+                menu::uiAct(step.act);
+            }
+
+            menu::uiLocate(step.pointAt);
+            dk64vr_logf("diag menu: step %d %s", tourStep, step.name);
+        }
+
+        if (step.nav && (t < 0.12)) {
+            diagMenuNav |= step.nav;
+        }
+
+        for (int i = 0; i < step.extraDowns; i++) {
+            const double from = 0.3 * (i + 1);
+            if ((t >= from) && (t < from + 0.12)) {
+                diagMenuNav |= nav::Down;
+            }
+        }
+
+        if ((step.pointAt[0] != '\0') && menuLast.locateValid) {
+            diagPointerU = menuLast.locateX / float(PanelWidth);
+            diagPointerV = menuLast.locateY / float(PanelHeight);
+        }
+        else if (step.pointAt[0] == '\0') {
+            diagPointerU = -1.0f;
+        }
+
+        diagPointerDown = step.click && (t >= 0.4 * stepLen) && (t < 0.4 * stepLen + 0.15);
+        const double dumpAt = 0.75 * stepLen;
+        if ((t >= dumpAt) && (tourDumped != tourStep)) {
+            tourDumped = tourStep;
+            menuDumpName = step.name;
+            menuPanelDump = tourStep;
+            dk64vr_logf("diag menu: %s: screen %s, tab %d, focus %s, pointer %s", step.name, (menuLast.screen == menu::Screen::Quick) ? "quick" : "full",
+                int(menuLast.tab), menuLast.focus.c_str(), (diagPointerU >= 0.0f) ? "on" : "off");
+        }
+    }
+
     Pose panelPose() const {
-        return poseMul(origin, Pose { Quat(), { 0.0f, 0.0f, -float(setting("panel_distance")) } });
+        const Pose turned = poseMul(origin, Pose { quatFromYaw(panelYawRad), {} });
+        return poseMul(turned, Pose { Quat(), { 0.0f, 0.0f, -float(setting("panel_distance")) } });
     }
 
     // The menu pointer: the dominant hand's aim ray (aim/pose -Z, lesson 41) against the panel.
     void updatePointer(const InputSample &s) {
         pointer.visible = false;
+        menuPointerOn = false;
         const int hand = dominantHand();
         Pose aim;
         bool haveAim = s.valid && input.aimPose(hand, aim);
-        if (!haveAim && (setting("diag_pointer") != 0.0)) {
+        if (vrMenuOpen) {
+            // The trigger, whether or not the ray is on the panel (a drag that leaves it and
+            // comes back is not a new click).
+            const bool down = s.valid ? triggerClick(menuPointerDown, (hand == 0) ? s.lTrigger : s.rTrigger) : diagPointerDown;
+            if (down && !menuPointerDown && s.valid) {
+                sfvr_haptic_event(&input.haptics, hand, SFVR_HAPTIC_UI_CLICK);
+            }
+
+            menuPointerDown = down;
+        }
+        else {
+            menuPointerDown = false;
+        }
+
+        const bool tourAim = (diagPointerU >= 0.0f) && vrMenuOpen;
+        if (!haveAim && ((setting("diag_pointer") != 0.0) || tourAim)) {
             // Diagnostic: a hand 25 cm right of and 30 cm below the recentre origin, aimed at a
-            // point right of and above the panel's centre.
+            // point right of and above the panel's centre (or where the menu tour points).
             const Pose panel = panelPose();
-            const Vec3 handPos = quatRotate(origin.q, Vec3 { 0.25f, -0.3f, 0.0f });
+            const Vec3 handPos = quatRotate(panel.q, Vec3 { 0.25f, -0.3f, 0.0f });
             aim.p = { origin.p.x + handPos.x, origin.p.y + handPos.y, origin.p.z + handPos.z };
-            const Vec3 target = quatRotate(panel.q, Vec3 { 0.15f * float(setting("panel_width")), 0.1f, 0.0f });
+            const float panelW = float(setting("panel_width"));
+            const float panelH = panelW * float(PanelHeight) / float(PanelWidth);
+            const Vec3 target = tourAim ? quatRotate(panel.q, Vec3 { (diagPointerU - 0.5f) * panelW, (0.5f - diagPointerV) * panelH, 0.0f })
+                                        : quatRotate(panel.q, Vec3 { 0.15f * panelW, 0.1f, 0.0f });
             const Vec3 to = normalize({ panel.p.x + target.x - aim.p.x, panel.p.y + target.y - aim.p.y, panel.p.z + target.z - aim.p.z });
             const Vec3 up = { 0.0f, 1.0f, 0.0f };
             const Vec3 x = normalize(cross(to, up));
@@ -2321,7 +2682,7 @@ private:
             haveAim = true;
         }
 
-        if (!haveAim || !panelShownLast || !(uiMouse || (setting("diag_pointer") != 0.0)) || (panelChain.width == 0)) {
+        if (!haveAim || !panelShownLast || !(uiMouse || vrMenuOpen || (setting("diag_pointer") != 0.0)) || (panelChain.width == 0)) {
             if (pointerDown) {
                 pointerDown = false;
                 queueMouseButton(false);
@@ -2355,6 +2716,14 @@ private:
         pointer.surface = panel;
         const float u = hx / width + 0.5f, v = 0.5f - hy / height;
         const int px = int(u * float(panelChain.width)), py = int(v * float(panelChain.height));
+        if (vrMenuOpen) {
+            // The VR menu hit-tests the pointer itself (dk64vr_menu_ui.cpp).
+            menuPointerOn = true;
+            menuPointerX = u * float(panelChain.width);
+            menuPointerY = v * float(panelChain.height);
+            return;
+        }
+
         if ((px != pointerPx) || (py != pointerPy)) {
             pointerPx = px;
             pointerPy = py;
@@ -2550,7 +2919,8 @@ private:
             quads.push_back(uiQuad(localSpace, beamPose(pointer.origin, end, eye), 64, 32, 0.006f, beamLength));
         }
 
-        const float dotSize = 0.018f * float(setting("panel_distance"));
+        // The dot shrinks while the trigger holds a VR menu control (the mockup's pressed state).
+        const float dotSize = 0.018f * float(setting("panel_distance")) * ((vrMenuOpen && menuPointerDown) ? 0.75f : 1.0f);
         quads.push_back(uiQuad(localSpace, dot, 0, 64, dotSize, dotSize));
     }
 
@@ -2725,7 +3095,8 @@ private:
             }
             else if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
                 const XrCompositionLayerQuad *q = reinterpret_cast<const XrCompositionLayerQuad *>(layer);
-                const char *name = (q->subImage.swapchain == panelChain.handle) ? "panel" : ((q->subImage.swapchain == hudChain.handle) ? "hud" : "ui");
+                const bool blended = (q->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0;
+                const char *name = (q->subImage.swapchain == panelChain.handle) ? (blended ? "panelpm" : "panel") : ((q->subImage.swapchain == hudChain.handle) ? "hud" : "ui");
                 snprintf(buffer, sizeof(buffer), " | %s%s p %.4f %.4f %.4f q %.5f %.5f %.5f %.5f size %.4f %.4f rect %d %d %d %d", name, (q->space == viewSpace) ? "@view" : "",
                     q->pose.position.x, q->pose.position.y, q->pose.position.z, q->pose.orientation.x, q->pose.orientation.y, q->pose.orientation.z, q->pose.orientation.w,
                     q->size.width, q->size.height, q->subImage.imageRect.offset.x, q->subImage.imageRect.offset.y, q->subImage.imageRect.extent.width, q->subImage.imageRect.extent.height);
@@ -2820,7 +3191,7 @@ private:
         r.keepAlpha = true;
         return r;
     }
-    bool layersLogDue = false;
+    std::atomic<bool> layersLogDue = false;
     bool uiReady = false;
     std::vector<XrCompositionLayerQuad> extraQuadStorage;
     std::mutex panelMutex;
@@ -2965,6 +3336,36 @@ private:
     int diagSnapFrames = -1;
     int pointerPx = -1, pointerPy = -1;
 
+    // The VR settings menu.
+    bool vrMenuOpen = false;
+    std::atomic<bool> vrMenuShown = false;     // read by the present thread (panelAcquire)
+    bool panelAcquiredUiOnly = false;          // present thread: the image being drawn
+    std::atomic<bool> panelImageUiOnly = false;  // the last released panel image is menu only
+    float panelYawRad = 0.0f;                  // the panel's turn from the recentre forward
+    bool menuPointerOn = false, menuPointerDown = false;
+    float menuPointerX = 0.0f, menuPointerY = 0.0f;
+    InputSample lastSample;
+    menu::FrameOut menuLast;
+    bool menuMissing = false;
+    int recommendedEyeWidth = 0;
+    bool settingsDirty = false;
+    double settingsDirtyS = 0.0;
+    std::thread saverThread;
+    std::mutex saverMutex;
+    std::condition_variable saverCv;
+    dk64vr_settings_t saverCopy = {};
+    bool saverPending = false, saverStop = false;
+    // Its diagnostic tour.
+    int tourStep = -1, tourDumped = -1;
+    double tourStepS = 0.0;
+    bool tourActed = false, tourDone = false;
+    bool menuEyeDump = false, menuEyeDumpAsked = false;
+    uint32_t diagMenuNav = 0;
+    float diagPointerU = -1.0f, diagPointerV = 0.0f;
+    bool diagPointerDown = false;
+    std::atomic<int> menuPanelDump = -1;
+    std::string menuDumpName;
+
     bool hudFailed = false;
     bool waitFailed = false, beginFailed = false, endFailed = false, panelFailed = false, acquireFailed = false;
     bool fovFallback = false, ipdFallback = false, ipdLogged = false;
@@ -3005,6 +3406,12 @@ void hostShutdown() {
 void hostFilterInput(int player, uint16_t *buttons, float *x, float *y) {
     if (host != nullptr) {
         host->filterInput(player, buttons, x, y);
+    }
+}
+
+void hostUiInit() {
+    if (host != nullptr) {
+        host->uiInit();
     }
 }
 

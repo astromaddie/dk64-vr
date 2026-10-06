@@ -689,6 +689,10 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
     menu->remove_default_title();
 
     dk64::launcher_animation_setup(menu);
+#ifdef DK64_VR
+    // The VR settings menu's document, created on recompui's thread like the launcher's.
+    dk64vr::hostUiInit();
+#endif
 }
 
 #ifdef DK64_VR

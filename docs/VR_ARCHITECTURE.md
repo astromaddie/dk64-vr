@@ -182,6 +182,7 @@ AxA -> BxB (xS, target 2160, max ...)`.
 | `diag_snap_seconds` | 0 s | A snap turn right every N s of play, with the game camera's and the shown heading logged for 12 frames |
 | `diag_hud_seconds` | 0 s | Show the game's HUD counters every N s of play (through its own `func_global_asm_806F8BC4`), with an eye and HUD dump half a second later |
 | `diag_start_at` | 0 s | Press Start for 0.2 s (the game's pause menu) |
+| `diag_vr_menu_at`, `diag_vr_menu_step`, `diag_vr_menu_tab` | 0 s, 2.5 s, -1 | A tour of the VR settings menu (section 9a) from this time, in stereo play if the run gets there within another minute: an eye dump of the world just before, then per step a `vr-menu-<step>-NNN.png` panel dump (with alpha) and a layers line. `diag_vr_menu_tab` 0-4 opens that tab and leaves it up instead. Changes no setting |
 
 Standard keys this port uses: `turn_mode` (snap; smooth orbits about Donkey Kong, section 8),
 `snap_angle` (45; port default, the user's choice), `smooth_turn_speed` (120),
@@ -512,7 +513,8 @@ logs and dumps (and composites rebuilt from them); it never pressed a button.
 | Pause when unfocused or in standby, quit while paused | verified unattended (game rate 0 Hz while the XR loop runs at 72; clean quit) |
 | Rumble Pak to haptics | built; not exercised (no wearer) |
 | Diagnostics (above) | verified unattended |
-| Vignette (also during the smooth orbit), fade on flat/stereo/cinema switches (still a 0.2 s black cut), roomscale, seated mode, camera shake off, in-headset VR settings page | not started (the vignette is deferred: it needs its own radial image and an alpha ramp) |
+| VR settings menu (Menu + View: quick menu, full panel), chord resolution, live settings and `vr.toml` writes | host-tested (chord timing, rows and keys, Defaults, world size, save round trip); unattended: see section 9a's dumps; headset-unverified |
+| Vignette (also during the smooth orbit), fade on flat/stereo/cinema switches (still a 0.2 s black cut), roomscale, seated mode, camera shake off | not started (the vignette is deferred: it needs its own radial image and an alpha ramp) |
 
 ## 8. Controls
 
@@ -534,6 +536,7 @@ Bindings and the map: `src/vr/bridge/dk64vr_input.{h,cpp}`; OpenXR: `src/vr/xr/x
 | Menu | right | Start: pause, skip | left stick click | left Menu |
 | View, short | left | the recomp menu (DK64 Recompiled's Back) | right stick click | left stick click |
 | View, hold 1 s | left | recentre, 0.6/80 ms buzz on both hands | as above | as above |
+| Menu + View, hold 0.5 s | both | the VR settings menu (section 9a), from anywhere; again to close | as above | as above |
 | D-pad | left | N64 D-pad | none | none |
 | Left stick | left | N64 stick, relative to where you look | left stick | left stick |
 | Right stick X | right | snap turn 45 degrees, or the smooth orbit with `turn_mode = smooth` (`right_stick_x = camera`: the game's C-left/C-right) | right stick | right stick |
@@ -544,6 +547,16 @@ Bindings and the map: `src/vr/bridge/dk64vr_input.{h,cpp}`; OpenXR: `src/vr/xr/x
 In a recomp menu: D-pad or left stick navigate, A accepts, B goes back, Menu applies, the bumpers
 switch tabs, the trigger clicks where the pointer is, View closes. The game's own menus (title, file
 select, pause) take the N64 pad as usual.
+
+The Menu + View chord (`dk64vr::SystemChord`, host-tested) is resolved before either button acts
+alone (standard.md section 1). Menu down alone holds Start (or a recomp menu's Apply) back for
+0.15 s: View joining in that time makes the chord, otherwise Start passes from then on, and a tap
+shorter than that is sent as a 0.12 s Start after the release. View down alone goes to its own
+state machine, which acts only on release (the recomp menu) or at 1 s (recentre); Menu joining
+within 0.9 s makes the chord and cancels the View press without an event. From the moment both
+are down nothing passes, whether the chord completes (0.5 s, a click on both hands) or one
+button is let go early, until both are up. View held past 0.9 s and then Menu are two separate
+actions (Start at once). Pausing is 0.15 s later than before; nothing else changed.
 
 Turning: the game eases its camera to a new heading over a second or more. A snap writes the camera's
 heading (`CameraPaad::unkB2`, through the `recomp_vr_take_turn` import in the camera patch,
@@ -595,6 +608,55 @@ camera's viewport and aspect to the band between the bars, so rows map to tangen
 viewport. The HUD quad sits 2 cm in front of the screen and spans the whole frame, so dialogue drawn in
 a bar shows above or below the picture.
 
+
+## 9a. VR settings menu
+
+The approved design (mockup layouts C then B): Menu + View held 0.5 s opens a quick menu of big
+tiles, and its "All VR settings..." opens the full panel. Code: `src/vr/menu/dk64vr_menu.*` (the
+model: rows, focus, pointer, Defaults, scrolling, and the RML it writes; pure, host-tested),
+`src/vr/menu/dk64vr_menu_ui.*` (one recompui context on `assets/vr_menu.rml`, styled by
+`assets/vr_menu.rcss`), `XrHost::openVrMenu`, `feedVrMenu`, `closeVrMenu`.
+
+- **Quick menu (C)**, 1600 x 868 px centred on the panel: tiles Turning (Snap / Smooth; Off is in
+  the full panel), Snap angle, World size, Camera smoothing, HUD distance, Foveation, each with its
+  value and a line under the control (the reason when it is dimmed); Recentre now (the one blue
+  button) in the title bar; All VR settings... and the hint bar at the bottom.
+- **Full panel (B)**, 1808 x 1000 px: a rail with the standard's tabs in order (Comfort, Controls,
+  HUD & menus, Display & performance, Room; no Accessibility & audio keys exist), per-tab Defaults
+  (first press turns it red and names the tab, a second within 3 s resets the tab's keys), a "Game
+  paused" chip, rows of label, description and control. Comfort has World size, Lower camera and
+  Camera closer (the last two only when `camera_lower` and `camera_closer` are registered: rows
+  whose key is missing hide themselves). Display & performance shows the measured display rate,
+  read only, and says SteamVR's per-app setting decides it. Rows for registry keys that do nothing
+  yet (vignette, roomscale, lean limit, height offset, seated) are shown dimmed with a "Coming"
+  badge, as in the mockup. No diagnostics anywhere (host-tested).
+- **World size** is Donkey Kong's height (25.2 game units, section 5): `world_scale` = 25.2 /
+  height. The stepper walks 0.5, 0.8, 1.0, 1.2, 1.4, 1.6, 1.68 (default, "DK 1.7 m"), 1.8, 2.0,
+  2.2, 2.5, 3, 3.5, 4, 5 and 6 m, limited to what the key's range allows (5 m with this build's
+  floor of 5 units a metre), with a comparison ("About as tall as you" ... "Giant").
+- **Input.** The pad: up/down move the focus (an orange pulsing ring, recompui's Secondary to
+  SecondaryL), left/right change the value (held: repeats after 0.4 s every 0.09 s), A selects
+  (segments cycle, toggles flip, buttons press), B or View goes back (B to C, C closes), the bumpers
+  switch tabs, right stick Y scrolls. Dimmed rows, read-only rows and the controller map are skipped.
+  The pointer: the dominant hand's aim ray, hit-tested by the menu against the laid-out document
+  (`Rml::Context::GetElementAtPoint`, `data-act` attributes); hover lights the control (ui_hover
+  haptic), the trigger clicks on press (ui_click), a slider drags anywhere on its 76 px strip, and
+  the dot shrinks while the trigger is held. The pointer stays the last layer, its dot flat on the
+  panel (lessons 41, 80, 83). Neither reaches recompui's other menus while this one is open.
+- **Settings** change at once: the menu works on a copy and hands every change to the host, which
+  sets it in its own settings (read every frame) and writes `vr.toml` atomically on a worker thread
+  0.5 s after the last change and on close. Foveation levels and eye tracking change live when the
+  shading-rate backend came up at launch; refresh rate and resolution apply at the next launch (the
+  rows say so).
+- **Pause.** While open the game is paused (the standby path: the game thread waits in its frame
+  publish) and, in stereo, the recomp-menu path freezes the world, dimmed, behind the panel. The
+  panel turns to face the head when the menu opens (yaw only; back on close and on recentre) and
+  shows only the menu: RT64 draws the UI hook over transparent black (`VrHost::panelUiOnly`) and the
+  panel layer is blended with premultiplied alpha (logged as `panelpm`). Over the launcher or a
+  recomp menu the menu covers the panel with a dark backdrop instead. Closing resumes; the button
+  that closed it is ignored until released (`InputMapper::ignoreHeld`).
+- Sizes follow the mockup: 1 degree is about 30 px at 2 m, text 26 px or more, targets 76 px or more.
+
 ## 10. Wear checklist (about 15 minutes)
 
 Build: branch `vr-polish`, installed as the `DK64VR` devkit title (binary md5
@@ -625,8 +687,13 @@ library (not SSH). Claim the Frame as `user-wearing`. Read the log afterwards wi
    the panel in front, and no flicker to a black room. View (short) opens the recomp menu the same
    way: navigate with the stick, click with the trigger, close with View. Walk through a door to a
    new area: a fade to black and back, no flat panel in between.
-6b. Smooth orbit (2 min, optional): set `turn_mode = "smooth"` in `vr.toml` (no in-headset VR page yet);
-   hold the right stick: the camera orbits DK at up to 120 deg/s and stops when you let go.
+6b. VR settings menu (3 min): in DK Isles, hold Menu and View together for half a second. The world
+   freezes, dimmed, and the quick menu floats in front of you (no pause menu, no recentre, no
+   recomp menu should appear). Change Turning to Smooth with the pointer and World size with the
+   D-pad (right makes DK taller; the frozen world shows it after closing). Open All VR settings..., switch tabs with
+   the bumpers, scroll Comfort with the right stick, try Defaults (it asks once). Close with B (or
+   Menu + View again): the game carries on and the B press does not swing the camera. Is all text
+   readable, and are the targets easy to hit?
 7. Recentre and focus (1 min): turn your body 90 degrees and hold View 1 s: buzz, view recentred behind
    DK. Lift the headset off for a few seconds: on return the game should have waited.
 8. Answer: scale, HUD distance and size, snap angle, cinema distance and depth, any button that does
