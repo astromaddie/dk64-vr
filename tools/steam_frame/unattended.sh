@@ -62,6 +62,13 @@ sleep "$seconds"
 
 # Stop it if it is still running (its own container), then fetch.
 ssh "${ssh_opts[@]}" "$host" 'pid=$(pgrep -x DK64Recompiled | head -1); if [ -n "$pid" ]; then kill -TERM $pid; sleep 4; if pgrep -x DK64Recompiled >/dev/null; then echo "still running after TERM: killed"; kill -9 $pid; else echo "stopped by TERM"; fi; else echo "exited on its own"; fi'
+# A vr-diag the launcher never consumed means the run did not start (e.g. Steam waiting on a prompt
+# in the headset). Disarm it, or the user's next real launch inherits the diagnostics.
+if ssh "${ssh_opts[@]}" "$host" "test -f ~/$data/vr-diag"; then
+	ssh "${ssh_opts[@]}" "$host" "rm -f ~/$data/vr-diag"
+	echo "ERROR: the run never started (vr-diag was not consumed; removed it). Check Steam's console_log.txt for ShowInterstitials." >&2
+	exit 4
+fi
 mkdir -p "$out"
 scp -q "${ssh_opts[@]}" "$host:devkit-game/$title/run-stdout.txt" "$out/run-stdout.txt" || true
 scp -q -r "${ssh_opts[@]}" "$host:$data/vr-dumps" "$out/" 2>/dev/null || true
