@@ -17,6 +17,7 @@
 #include "dk64vr_sched.h"
 #include "dk64vr_settings.h"
 #include "dk64vr_log.h"
+#include "shared/rt64_projection_fog.h"
 
 using namespace dk64vr;
 
@@ -215,6 +216,135 @@ static void testFogRemap() {
     const FogRemap same = fogRemap(game, game);
     CHECK_NEAR(same.a, 1.0, 1e-5);
     CHECK_NEAR(same.b, 0.0, 1e-5);
+}
+
+static void testEyeNearAndFog() {
+    const FovTangents fov = { -1.66f, 1.22f, 1.17f, -1.73f };
+    float minimumMargin = 1.0f;
+    for (float farZ : { 1000.0f, 6000.0f, 30000.0f }) {
+        for (float scale : { 1.0f, 0.5f }) {
+            Mat4 game = guPerspective(45, 4.0f / 3, 10, farZ, scale);
+            // N64 input matrices can be s15.16. The eye projection is subsequently FLOAT,
+            // so it must not inherit a fixed-point rounding of its new depth coefficients.
+            for (auto &row : game.m) for (float &v : row) v = std::round(v * 65536.0f) / 65536.0f;
+            const Mat4 old = eyeProjection(fov, game);
+            const Mat4 fallback = eyeProjection(fov, game, 0);
+            CHECK(std::memcmp(&old, &fallback, sizeof(old)) == 0);
+            const double gameFar = double(game.m[3][2]) / (double(game.m[2][2]) - game.m[2][3]);
+            for (float units : { 4.0f, 8.0f, 15.0f, 100.0f }) {
+                for (float metres : { 0.05f, 0.10f, 0.25f }) {
+                    const float nearZ = metres * units;
+                    const Mat4 eye = eyeProjection(fov, game, nearZ);
+                    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) {
+                        if ((c == 2) && ((r == 2) || (r == 3))) continue;
+                        CHECK_NEAR(eye.m[r][c], old.m[r][c], 0);
+                    }
+                    CHECK_NEAR(depthToZw(eye, nearZ), -1, 3e-7);
+                    CHECK_NEAR(depthToZw(eye, float(gameFar)), 1, 3e-7);
+                    // RSP's standard 511/1024 viewport maps NDC -1 to depth 0, +1 to 1022/1024.
+                    CHECK_NEAR((depthToZw(eye, nearZ) + 1) * (511.0 / 1024), 0, 2e-7);
+                    CHECK_NEAR(clipToNdc({ fov.left * nearZ, 0, -nearZ }, eye).x, -1, 3e-7);
+                    CHECK_NEAR(clipToNdc({ fov.right * nearZ, 0, -nearZ }, eye).x, 1, 3e-7);
+                    CHECK_NEAR(clipToNdc({ 0, fov.up * nearZ, -nearZ }, eye).y, 1, 3e-7);
+                    CHECK_NEAR(clipToNdc({ 0, fov.down * nearZ, -nearZ }, eye).y, -1, 3e-7);
+                    const FogRemap fog = fogRemap(game, eye); // production coefficient helper
+                    for (float viewportScale : { 511.0f / 1024.0f, 0.5f }) {
+                        const auto screen = RT64::projectionScreenRemap(fog.a, fog.b, viewportScale, viewportScale);
+                        const float cap = 1022.0f / 1024.0f;
+                        const float eyeCap = RT64::projectionEyeDepth(cap, screen.a, screen.b);
+                        CHECK_NEAR(RT64::projectionGameDepth(eyeCap, screen.a, screen.b), cap, 4e-6);
+                        const double capZw = (double(cap) - viewportScale) / viewportScale;
+                        const double ga = double(game.m[2][2]) / game.m[2][3];
+                        const double gb = -double(game.m[3][2]) / game.m[2][3];
+                        const float capDistance = float(gb / (capZw - ga));
+                        const float eyeAtCap = depthToZw(eye, capDistance) * viewportScale + viewportScale;
+                        CHECK_NEAR(eyeAtCap, eyeCap, 3e-7); // original F3D far cutoff in metres
+                        for (float primitive : { 0.25f, 0.5f, 0.9f, cap }) {
+                            const float converted = RT64::projectionEyeDepth(primitive, screen.a, screen.b);
+                            CHECK_NEAR(RT64::projectionGameDepth(converted, screen.a, screen.b), primitive, 4e-6);
+                        }
+                        // Decal coplanar tolerance and primitive dz use the inverse slope;
+                        // screen-space derivatives already follow the eye projection naturally.
+                        const float gameTolerance = 0.0000625f, eyeTolerance = gameTolerance / std::fabs(screen.a);
+                        CHECK_NEAR(eyeTolerance * std::fabs(screen.a), gameTolerance, 1e-10);
+                        const float surface = RT64::projectionEyeDepth(0.97f, screen.a, screen.b);
+                        for (float offset : { 0.25f, 4.0f }) {
+                            const float decal = RT64::projectionEyeDepth(0.97f + offset * gameTolerance, screen.a, screen.b);
+                            CHECK((std::fabs(decal - surface) <= eyeTolerance) == (offset < 1));
+                        }
+                    }
+                    for (float d : { nearZ * 0.5f, nearZ, 5.0f, 10.0f, 25.0f, 333.0f, float(gameFar * 0.9), float(gameFar) }) {
+                        const float eyeZ = -d * eye.m[2][2] + eye.m[3][2], eyeW = -d * eye.m[2][3];
+                        const float gameZ = -d * game.m[2][2] + game.m[3][2], gameW = -d * game.m[2][3];
+                        // Calls the very function included by RSPProcessCS, including clamp order.
+                        const float remappedZ = RT64::projectionFogZ(eyeZ, eyeW, fog.a, fog.b);
+                        const float got = std::max(remappedZ, 0.0f) / eyeW;
+                        const float expected = std::max(gameZ, 0.0f) / gameW;
+                        CHECK_NEAR(got, expected, 2e-5);
+                        for (float mul : { -150.0f, 500.0f, -32768.0f }) {
+                            const float offset = 255.0f - mul * expected;
+                            const float ga = std::clamp((got * mul + offset) / 255.0f, 0.0f, 1.0f);
+                            const float ea = std::clamp((expected * mul + offset) / 255.0f, 0.0f, 1.0f);
+                            CHECK_NEAR(ga, ea, 1.0 / 255); // <1 fog-alpha byte, even worst s16 mul
+                        }
+                    }
+                    // Combined float view-projection at large world coordinates, after N64
+                    // view rounding; sky follows the game camera, the closer eye is displaced.
+                    const Vec3 original = { 10000, -3000, 9000 }, origin = { 10000, -3015, 8920 };
+                    Mat4 view = guLookAt(origin, { origin.x, origin.y, origin.z - 1 }, { 0, 1, 0 });
+                    for (auto &row : view.m) for (float &v : row) v = std::round(v * 65536.0f) / 65536.0f;
+                    const Mat4 vp = mul(view, eye);
+                    const Vec3 sky = { original.x, original.y, original.z - float(gameFar * 0.9) };
+                    const float zw = clipToNdc(sky, vp).z;
+                    const float margin = 1.0f - zw;
+                    CHECK(margin > 0); // no far-plane crossing
+                    if (metres == 0.10f) {
+                        minimumMargin = std::min(minimumMargin, margin);
+                        const float depth = (zw + 1.0f) * (511.0f / 1024.0f);
+                        const float depthLimit = 1022.0f / 1024.0f;
+                        const float ulp = depthLimit - std::nextafter(depthLimit, 0.0f);
+                        CHECK((depthLimit - depth) / ulp >= 16.0f);
+                    }
+                }
+            }
+        }
+    }
+    std::printf("eye near 0.10 m: minimum tested sky NDC margin %.8g (far <=30000, scale >=4)\n", minimumMargin);
+    CHECK_NEAR(RT64::projectionFogZ(0.7f, 123, 1, 0), 0.7f, 0);
+}
+
+static void testEyeNearSettings() {
+    dk64vr_settings_t s = {}, saved = {};
+    dk64vr_settings_defaults(&s);
+    dk64vr_settings_defaults(&saved);
+    const int index = dk64vr_settings_index("eye_near_m");
+    CHECK(index >= 0);
+    const sfvr_setting_key *key = dk64vr_settings_key(index);
+    CHECK(key->type == SFVR_SETTING_FLOAT);
+    CHECK_NEAR(key->min, 0, 0); CHECK_NEAR(key->max, 0.25, 0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "eye_near_m"), 0.1, 1e-9);
+    dk64vr_settings_set(&s, "eye_near_m", 0.12);
+    CHECK(dk64vr_settings_apply_env(&s, [](const char *name) -> const char * {
+        return std::strcmp(name, "DK64_VR_EYE_NEAR_M") == 0 ? "0.08" : nullptr;
+    }) == 1);
+    CHECK_NEAR(dk64vr_settings_get(&s, "eye_near_m"), double(0.08f), 0);
+    CHECK_NEAR(s.file_values[index], double(0.12f), 0);
+    size_t length = 0;
+    char *text = dk64vr_settings_format(&s, &length);
+    CHECK(text != nullptr);
+    if (text) CHECK(dk64vr_settings_parse(&saved, text, length) == 0);
+    CHECK_NEAR(saved.file_values[index], 0.12, 1e-6);
+    CHECK_NEAR(saved.file_values[dk64vr_settings_index("port_schema")], 5, 0);
+    std::free(text);
+    dk64vr_settings_set(&s, "eye_near_m", -1); CHECK_NEAR(dk64vr_settings_get(&s, "eye_near_m"), 0, 0);
+    dk64vr_settings_set(&s, "eye_near_m", 99); CHECK_NEAR(dk64vr_settings_get(&s, "eye_near_m"), 0.25, 0);
+    const char *fallback = "version=1\n[vr]\nport_schema=5\neye_near_m=0\nworld_scale=4\ncamera_closer=0.8\n";
+    // This sparse A/B config adds every missing registry key, without changing its four choices.
+    CHECK(dk64vr_settings_parse(&saved, fallback, std::strlen(fallback)) == int(dk64vr_settings_count()) - 4);
+    CHECK_NEAR(saved.file_values[index], 0, 0);
+    CHECK_NEAR(saved.file_values[dk64vr_settings_index("world_scale")], 4, 0);
+    CHECK_NEAR(saved.file_values[dk64vr_settings_index("camera_closer")], 0.8, 1e-6);
+    dk64vr_settings_free(&s); dk64vr_settings_free(&saved);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1574,8 +1704,7 @@ static void testWorldScaleConsumers() {
         const Vec3 a = viewPosition(eyeView(view, neutral, units)), b = viewPosition(eyeView(view, moved, units));
         const Vec3 d = { b.x - a.x, b.y - a.y, b.z - a.z };
         CHECK_NEAR(std::sqrt(dot(d, d)) / units, std::sqrt(0.14), 2e-5);
-        // Retaining game depth terms preserves fog and precision at every scale. The near is
-        // 10 game units (2.5 m at scale 4), so no fog remap or visibility-mask change is needed.
+        // The diagnostic eye_near_m=0 and cinema retain the original depth bits at every scale.
         CHECK_NEAR(projection.m[2][2], gameProj.m[2][2], 0);
         CHECK_NEAR(projection.m[3][2], gameProj.m[3][2], 0);
         const FogRemap fog = fogRemap(gameProj, projection);
@@ -1657,6 +1786,8 @@ int main() {
     testLevelView();
     testPoseMath();
     testFogRemap();
+    testEyeNearAndFog();
+    testEyeNearSettings();
     testSchedulerSteady120();
     testSchedulerSteady90And72();
     testSchedulerJitter();

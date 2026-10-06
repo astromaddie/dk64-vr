@@ -25,6 +25,8 @@ static const sfvr_setting_key port_keys[] = {
 	// Game units per metre. Donkey Kong's model spans 25.2 units ([vr] player extent, DK Isles),
 	// so 15 makes him about 1.7 m tall; docs/VR_ARCHITECTURE.md section 5.
 	{ "world_scale", SFVR_SETTING_FLOAT, 15.0, 4.0, 100.0, NULL },
+	// Immersive eyes only: metres converted by world_scale; 0 restores the game's near for A/B.
+	{ "eye_near_m", SFVR_SETTING_FLOAT, 0.1, 0.0, 0.25, NULL },
 	// Third-person head origin only; the game camera and its collision are unchanged.
 	{ "camera_lower", SFVR_SETTING_FLOAT, 0.0, 0.0, 1.0, NULL },
 	{ "camera_closer", SFVR_SETTING_FLOAT, 0.0, 0.0, 0.8, NULL },

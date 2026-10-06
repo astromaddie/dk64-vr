@@ -123,12 +123,14 @@ perspective projection drawn there. The host (`XrHost::eyeCamera`) replaces:
 
 - view = level(lerped game view) · inverse(eye pose in the head-origin frame, translation × world_scale);
   `level_pitch` (default on) drops the game camera's pitch and roll and keeps its heading;
-- projection = the runtime's per-eye asymmetric FOV tangents in the game's projection form, keeping the
-  game's depth terms and scale, so z/w, the depth buffer and fog are unchanged
-  (`dk64vr::eyeProjection`; with symmetric tangents it equals `guPerspective`, tested).
+- projection = the runtime's asymmetric FOV, the game's overall projection scale and extracted far,
+  with `eye_near_m` (default **0.10 m**) converted to game units by `world_scale`. This applies to
+  immersive eye passes, including first person; cinema/panels keep their existing projection.
+  `eye_near_m=0` preserves the game's depth bits (10-unit near) for A/B.
 
-The eye near plane is the game's (10 units, 0.67 m at the default 15 units/m), so no fog remap
-is applied; `dk64vr::fogRemap` (tested) is ready for a smaller near. Head pose comes only from the runtime: eye
+The 0.10 m default permits nearby DK/scenery while giving twice the far-depth margin of 0.05 m.
+Only the near-dependent depth coefficients change; FOV edges, view composition, camera smoothing,
+orbit, runtime IPD and tracking remain identical. Head pose comes only from the runtime: eye
 poses relative to the head from `xrLocateViews`, head from the VIEW space, both in LOCAL space. The game
 camera supplies the head origin (with optional third-person offsets below); the origin recentres
 on the first tracked frame and on
@@ -141,11 +143,11 @@ extent` log): Donkey Kong's model spans 25.2 world units vertically, so he is ab
 runs of the same log gave 32-42 units because its 40-unit radius picks up props near the hut; the 25.2
 reading is the clean one. The range is **4-100 units/m**; smaller numbers make the entire world
 bigger (DK: 1.68 m at 15, 3.15 m at 8, 6.30 m at 4). The minimum 4 permits 3.75x the default world
-size while retaining the original projection depth terms, near/far planes and float view pipeline.
+size with a constant physical eye near and a float view/projection pipeline.
 The derived menu readout is `dk64vr_settings_dk_height(settings)` = 25.2 / `world_scale`, labelled
 "DK height ≈ X m"; it is an estimate from that model, never a persisted setting. A line at start-up
 and once per effective value change says, for example,
-`[vr-cam] world_scale 8.0 (DK height ≈ 3.15 m) lower 0.50 closer 0.30`.
+`[vr-cam] world_scale 8.0 (DK height ≈ 3.15 m) lower 0.50 closer 0.30 eye_near_m 0.100`.
 
 Scale consumers (audited in `XrHost::eyeCamera`, `locateViews`, `hiddenMesh`, the quad builders and
 `CameraSmoother`):
@@ -153,11 +155,9 @@ Scale consumers (audited in `XrHost::eyeCamera`, `locateViews`, `hiddenMesh`, th
 - Eye offsets/IPD and the recentred head-centre displacement both convert metres to game units
   through the same `eyeView(..., world_scale)`. `head_translation` scales only the latter before
   that conversion; runtime IPD is never edited.
-- Near/far and z/w stay in game units, so depth precision and the fog remap stay unchanged
-  (`fogRemap` is identity). The 10-unit near is 1.25 m at scale 8 and **2.5 m at scale 4**; large
-  worlds and very close cameras can visibly clip DK or nearby geometry. A smaller physical near
-  would need a production RSP fog remap (the pure helper alone is insufficient), so this change
-  deliberately preserves the game projection. Values below 4 are clamped.
+- Eye near = `eye_near_m * world_scale`: 1.5 / 0.8 / 0.4 units at scales 15 / 8 / 4 with the
+  0.10 m default. Far stays the game's extracted far. Fog and emulated depth consumers use the
+  exact per-projection conversion below. Values below world scale 4 are clamped.
 - HUD, panel and cinema dimensions/distances stay in runtime metres. Cinema's separation is derived
   from runtime IPD and screen dimensions, independently of gameplay scale. Hidden-area triangles
   remain FOV/NDC based; their projection and near-depth mask need no scale adjustment.
@@ -166,13 +166,55 @@ Scale consumers (audited in `XrHost::eyeCamera`, `locateViews`, `hiddenMesh`, th
   ordinary camera motion in the biggest worlds. Its physical size varies (4 m at 15, 15 m at 4).
   Snap/smooth orbit distances and pivots remain game units; scale converts the final eye pose.
 
+Depth/fog (host-tested; **headset-unverified**): `ProjectionProcessor` computes a float2 remap
+for each overridden camera projection, from the actual interpolated game and eye matrices.
+For row-major standard perspective `z/w = A + B/d`, `A=m22/m23`, `B=-m32/m23`:
+`z/w_game = a*(z/w_eye)+b`, where `a=B_game/B_eye`, `b=A_game-a*A_eye`. The coefficient calculation
+uses double precision; the GPU receives floats. The table resets to identity for every projection
+on each replay, including flat/2D/cinema, and is uploaded/bound alongside the view-projection table.
+`RSPProcessCS` evaluates `max(a*z_eye+b*w_eye,0)/w_eye` **before** applying the original fog multiplier,
+offset and alpha clamp. Clamping the eye z first would incorrectly fog newly visible close geometry.
+The C++ tests and shader share `shared/rt64_projection_fog.h`; identity bypasses arithmetic.
+
+The raster conversion uses the actual viewport: game screen depth = `a*eyeDepth+b_screen`, with
+`b_screen=viewport.scale.z*b+(1-a)*viewport.translate.z`. Per-call push constants convert the
+F3D `1022/1024` far-depth cap, primitive depth/dz and decal coplanar tolerance, keeping their original
+physical cutoffs/ordering. Depth derivatives already follow the eye projection. Newly visible
+geometry inside the old near clamps the emulated N64 tolerance input to [0,1], avoiding negative
+float-to-uint conversion. The hidden-area mesh still writes raster depth 0 first; LESS and D32F,
+depth clears, depth-read decal passes and no-near-clip draw rules are unchanged.
+
+Far precision: the eye depth coefficients and combined view-projection are float, never converted
+back to N64 s15.16. Tests cover rounded N64 input matrices, large coordinates, displaced eye origins,
+far 1000/6000/30000 and scales 4/8/15/100. At the 0.10 m default the minimum tested sky NDC margin is
+3.04e-6 (at far about 30000), with at least 16 D32F steps to the far boundary. At scale 4 / far 6000,
+the ideal 0.9-far sky margin is 1.48e-5. At that far distance, ordinary forward D32F depth resolution
+is about 4.3 game units (1.1 m at scale 4); nearby terrain is much better resolved. Far extension and
+reversed Z are unnecessary for the tested sky range and would complicate N64 depth semantics.
+Very small positive diagnostic near values below 0.05 m can reduce this margin/precision; 0 selects
+the original projection instead. GPU sky/decal ordering still requires the device A/B.
+
+RT64 has no CPU reject-only path for triangles crossing w=0: triangle indices survive the game's
+vertex transform and the GPU clips them after eye reprojection. F3D/F3DEX cull-display-list commands
+are no-ops; `ReJ` flags do not drive a reject path. `gSPVertexTestZ` reruns against eye-space depth.
+The audit found no other literal 10-unit near proxy in RT64, HUD/quad placement or billboard texgen.
+Display-list `branchZ` would still use the game's original camera; no DK64 C-source use was found,
+but binary-only use is unverified. The sky remains the camera-centred dome at 0.9*game far (clamped
+200-30000 units), and HUD/panel/cinema placement remains in runtime metres.
+
+With `diag_camera_log`, `[vr-cam] depth` records effective near in units/metres, the source far,
+the 0.9-far NDC margin and fog coefficients per eye-0 projection. It accompanies the once-per-change
+settings line, making `DK64_VR_EYE_NEAR_M=0` A/B explicit. Adding this key leaves port schema 5 and
+all migrations/user choices intact.
+
 Third-person camera settings (host-tested; **headset-unverified**): `camera_closer` (0-0.8) moves
 only the derived head origin along the smoothed game eye -> look-at line; `camera_lower` (0-1)
 then moves its remaining vertical separation toward the look-at height. For eye E, target A,
 closer C, lower L: P.xz = E.xz + C*(A.xz-E.xz), P.y = A.y + (1-C)*(1-L)*(E.y-A.y).
 Thus lower 1 is level with the target, closer 0.8 leaves 20% of the horizontal distance, and each
 coordinate stays between E and A. Defaults 0/0 bypass the offset correction completely (the
-composed view at world_scale 15 is byte-identical in host tests).
+composed view at world_scale 15 is byte-identical in host tests; projection depth now changes unless
+`eye_near_m=0`).
 
 The latest game-state focus is captured on each workload arrival and sampled with the camera's
 tick history and weight (linear with smoothing off, the same quadratic B-spline otherwise), resetting on the same hard cuts. One rigid offset correction
@@ -206,6 +248,7 @@ AxA -> BxB (xS, target 2160, max ...)`.
 | Port key | Default | Meaning |
 | --- | --- | --- |
 | `world_scale` | 15 | Game units per metre (4-100); DK height ≈ 25.2 / world_scale metres |
+| `eye_near_m` | 0.10 m | Immersive eye near in metres (0-0.25); 0 uses the game's near for A/B; `DK64_VR_EYE_NEAR_M` |
 | `camera_lower` | 0.0 | Third-person head origin toward the look-at height (0-1); `DK64_VR_CAMERA_LOWER` |
 | `camera_closer` | 0.0 | Third-person head origin along eye -> look-at (0-0.8); `DK64_VR_CAMERA_CLOSER` |
 | `level_pitch` | true | Drop the game camera's pitch and roll |
@@ -560,6 +603,7 @@ logs and dumps (and composites rebuilt from them); it never pressed a button.
 | Snap turn (instant on screen, game camera follows) | verified unattended (`diag_snap_seconds`: shown heading moves 30 degrees in one frame, the game camera arrives in 4-6 s); 45 degree default and unwrapped orbit headset-unverified |
 | Smooth orbit about DK (`turn_mode` smooth) | verified unattended (`diag_turn_stick=1`: the shown heading turns at exactly the requested rate, 120 deg/s at full deflection, and stops on release); headset-unverified |
 | Larger world (`world_scale` 4-100), lower/closer origin (`camera_lower`, `camera_closer`) | host-tested (math, spline/cut/orbit composition, default byte parity, range/round-trip/env); headset-unverified; [device check](VR_CAMERA_CHECK.md) |
+| Physical eye near (`eye_near_m`), per-projection fog/depth remap | host-tested (frustum/depth/fog/clamp equality, primitive/decal/cap conversion, large-coordinate sky margin, settings/env); headset-unverified; [device A/B](VR_CAMERA_CHECK.md) |
 | Camera smoothing (`camera_smoothing` medium) | host-tested; verified unattended (`[vr-cam]` before/after, section 5c); headset-unverified |
 | Transitions fade in stereo, pause/recomp menu over the frozen dimmed world | verified unattended (intro transitions freeze and fade, pause panel and recomp menu over the frozen world in the layer log); headset-unverified |
 | Hidden desktop window (no black SteamVR box at the launcher) | verified unattended (the `valve.steam.desktopgame.<appid>` overlay is no longer created; launcher and game run); headset-unverified |

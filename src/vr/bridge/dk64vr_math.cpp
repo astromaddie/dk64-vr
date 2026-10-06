@@ -1,4 +1,5 @@
 #include "dk64vr_math.h"
+#include "shared/rt64_projection_fog.h"
 
 #include <algorithm>
 #include <cmath>
@@ -419,7 +420,7 @@ Mat4 guLookAt(const Vec3 &eye, const Vec3 &at, const Vec3 &upIn) {
     return mf;
 }
 
-Mat4 eyeProjection(const FovTangents &fov, const Mat4 &gameProj) {
+Mat4 eyeProjection(const FovTangents &fov, const Mat4 &gameProj, float nearUnits) {
     // The game's overall scale: -[2][3] is 1 for guPerspective(..., scale = 1).
     float s = -gameProj.m[2][3];
     if (!(std::fabs(s) > 1e-12f)) {
@@ -441,6 +442,17 @@ Mat4 eyeProjection(const FovTangents &fov, const Mat4 &gameProj) {
     r.m[2][1] = s * (fov.up + fov.down) / h;
     r.m[3][0] = 0.0f;
     r.m[3][1] = 0.0f;
+    if (std::isfinite(nearUnits) && (nearUnits > 0.0f) && (gameProj.m[3][3] == 0.0f)) {
+        // Extract from the actual float projection, including its overall scale. Compute in
+        // double so a small near does not amplify coefficient rounding while rebuilding far.
+        const double farDenom = double(gameProj.m[2][2]) + s;
+        const double farZ = double(gameProj.m[3][2]) / farDenom;
+        if (std::isfinite(farZ) && (farZ > nearUnits)) {
+            const double n = nearUnits;
+            r.m[2][2] = float(-double(s) * (farZ + n) / (farZ - n));
+            r.m[3][2] = float(-double(s) * 2.0 * farZ * n / (farZ - n));
+        }
+    }
     return r;
 }
 
@@ -481,19 +493,8 @@ float depthToZw(const Mat4 &proj, float depth) {
 }
 
 FogRemap fogRemap(const Mat4 &gameProj, const Mat4 &eyeProj) {
-    // z/w = A + B/d with A = -m22/s... derived from two depths, which is exact for any
-    // projection whose z/w is affine in 1/d.
-    FogRemap r;
-    const float d0 = 1.0f, d1 = 2.0f;
-    const float e0 = depthToZw(eyeProj, d0), e1 = depthToZw(eyeProj, d1);
-    const float g0 = depthToZw(gameProj, d0), g1 = depthToZw(gameProj, d1);
-    if (!(std::fabs(e1 - e0) > 1e-12f)) {
-        return r;
-    }
-
-    r.a = (g1 - g0) / (e1 - e0);
-    r.b = g0 - r.a * e0;
-    return r;
+    const RT64::ProjectionFogRemap r = RT64::projectionFogRemap(&gameProj.m[0][0], &eyeProj.m[0][0]);
+    return { r.a, r.b };
 }
 
 EyeSize eyeSize(uint32_t recommendedWidth, uint32_t recommendedHeight, uint32_t maxWidth, uint32_t maxHeight, double resolutionScale, uint32_t target) {

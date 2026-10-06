@@ -669,7 +669,18 @@ public:
         }
 
         fromMat4(eyeView(gameView, eyeInHead[eye], float(setting("world_scale"))), outView);
-        fromMat4(eyeProjection(eyeFov[eye], gameProj), outProj);
+        const float nearUnits = float(setting("eye_near_m") * setting("world_scale"));
+        const Mat4 projection = eyeProjection(eyeFov[eye], gameProj, nearUnits);
+        fromMat4(projection, outProj);
+        if ((eye == 0) && (setting("diag_camera_log") != 0.0)) {
+            const float s = -projection.m[2][3];
+            const float nearZ = projection.m[3][2] / (projection.m[2][2] - s);
+            const double farZ = double(gameProj.m[3][2]) / (double(gameProj.m[2][2]) + s);
+            const float margin = 1.0f - depthToZw(projection, float(0.9 * farZ));
+            const FogRemap fog = fogRemap(gameProj, projection);
+            dk64vr_logpf("[vr-cam]", "depth f %" PRIu64 " near %.4f units (%.3f m) far %.1f units sky_margin %.8g fog %.8g %.8g", frameCount,
+                nearZ, nearZ / float(setting("world_scale")), farZ, margin, fog.a, fog.b);
+        }
     }
 
     plume::RenderFramebuffer *eyeFramebuffer(uint32_t eye, uint32_t *width, uint32_t *height) override {
@@ -1235,11 +1246,11 @@ private:
     }
 
     void logCameraSettings() {
-        const double values[] = { setting("world_scale"), setting("camera_lower"), setting("camera_closer") };
-        if (!cameraSettingsLogged || values[0] != cameraSettingsLast[0] || values[1] != cameraSettingsLast[1] || values[2] != cameraSettingsLast[2]) {
+        const double values[] = { setting("world_scale"), setting("camera_lower"), setting("camera_closer"), setting("eye_near_m") };
+        if (!cameraSettingsLogged || values[0] != cameraSettingsLast[0] || values[1] != cameraSettingsLast[1] || values[2] != cameraSettingsLast[2] || values[3] != cameraSettingsLast[3]) {
             cameraSettingsLogged = true;
-            std::copy(values, values + 3, cameraSettingsLast);
-            dk64vr_logpf("[vr-cam]", "world_scale %.1f (DK height ≈ %.2f m) lower %.2f closer %.2f", values[0], dk64vr_settings_dk_height(&settings), values[1], values[2]);
+            std::copy(values, values + 4, cameraSettingsLast);
+            dk64vr_logpf("[vr-cam]", "world_scale %.1f (DK height ≈ %.2f m) lower %.2f closer %.2f eye_near_m %.3f", values[0], dk64vr_settings_dk_height(&settings), values[1], values[2], values[3]);
         }
     }
 
@@ -2791,7 +2802,7 @@ private:
 
     dk64vr_settings_t settings = {};
     bool cameraSettingsLogged = false;
-    double cameraSettingsLast[3] = {};
+    double cameraSettingsLast[4] = {};
     std::filesystem::path dataDir;
     bool installed = false;
     bool haveRefreshRate = false;

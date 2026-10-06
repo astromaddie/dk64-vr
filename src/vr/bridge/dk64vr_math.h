@@ -122,10 +122,10 @@ Mat4 guPerspective(float fovyDegrees, float aspect, float nearZ, float farZ, flo
 Mat4 guLookAt(const Vec3 &eye, const Vec3 &at, const Vec3 &up);
 
 // The eye projection: the runtime's asymmetric frustum in the game's projection form. The
-// depth terms ([2][2], [3][2], [2][3], [3][3]) are the game's own, so z/w for a given eye-space
-// depth, and everything derived from it (depth buffer, fog), is unchanged. The x/y terms carry
-// the game's overall scale (guPerspective's `scale`, read from -[2][3]).
-Mat4 eyeProjection(const FovTangents &fov, const Mat4 &gameProj);
+// x/y terms carry the game's overall scale. nearUnits > 0 replaces only the depth terms with
+// that near and the game's extracted far, in float (never N64 fixed point). 0 preserves the
+// game's depth bits, for cinema and A/B. Changed depth requires the per-projection fog remap.
+Mat4 eyeProjection(const FovTangents &fov, const Mat4 &gameProj, float nearUnits = 0.0f);
 
 // Drops a view's pitch and roll: the same camera position, facing the horizontal part of its
 // forward direction with world +Y up. Looking straight down or up, the camera's up vector
