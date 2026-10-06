@@ -84,6 +84,15 @@ static const sfvr_setting_key port_keys[] = {
 	// Diagnostic: open the recomp menu this many seconds after the session starts (as a View
 	// press would). 0 = off.
 	{ "diag_menu_at", SFVR_SETTING_FLOAT, 0.0, 0.0, 3600.0, NULL },
+	// Diagnostic: a tour of the VR settings menu (Menu + View) this many seconds after the
+	// session starts, in stereo play if the run gets there within a minute more: the quick menu,
+	// pad focus, the pointer on a control and a click, every tab, scrolling, Defaults armed
+	// (never confirmed), back and close; each step's panel dumped as vr-menu-*.png with a layers
+	// line. Changes no setting. diag_vr_menu_step is each step's length; diag_vr_menu_tab 0-4
+	// opens that tab instead and leaves it up. 0 = off.
+	{ "diag_vr_menu_at", SFVR_SETTING_FLOAT, 0.0, 0.0, 3600.0, NULL },
+	{ "diag_vr_menu_step", SFVR_SETTING_FLOAT, 2.5, 1.0, 30.0, NULL },
+	{ "diag_vr_menu_tab", SFVR_SETTING_INT, -1.0, -1.0, 4.0, NULL },
 	// Diagnostic: a synthetic right hand aiming at the panel (a little right of and above its
 	// centre) whenever no tracked hand is, so the pointer layers can be dumped unattended.
 	{ "diag_pointer", SFVR_SETTING_BOOL, 0.0, 0.0, 1.0, NULL },

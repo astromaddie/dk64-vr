@@ -18,6 +18,7 @@
 #include "dk64vr_settings.h"
 #include "dk64vr_log.h"
 #include "shared/rt64_projection_fog.h"
+#include "dk64vr_menu.h"
 
 using namespace dk64vr;
 
@@ -930,19 +931,24 @@ static void testN64Map() {
     s.dpadUp = s.dpadLeft = true;
     s.lTrigger = 0.9f;
     s.rTrigger = 0.9f;
+    m.update(sampleIdle(), config, context, 0.9, 1.0f / 72.0f);
     InputResult r = m.update(s, config, context, 1.0, 1.0f / 72.0f);
     // DK64 Recompiled's defaults on an Xbox-layout pad (src/game/config.cpp set_control_defaults).
-    CHECK(r.buttons == (n64::A | n64::B | n64::CLeft | n64::CRight | n64::Start | n64::CDown | n64::CUp | n64::L | n64::DUp | n64::DLeft | n64::Z | n64::R));
+    // Start follows Menu once the Menu + View chord can no longer form (0.15 s).
+    const uint16_t all = n64::A | n64::B | n64::CLeft | n64::CRight | n64::CDown | n64::CUp | n64::L | n64::DUp | n64::DLeft | n64::Z | n64::R;
+    CHECK(r.buttons == all);
+    r = m.update(s, config, context, 1.16, 1.0f / 72.0f);
+    CHECK(r.buttons == (all | n64::Start));
     // Trigger hysteresis: 0.4 keeps Z held, 0.3 releases it, 0.45 does not re-press.
     s = sampleIdle();
     s.lTrigger = 0.4f;
-    r = m.update(s, config, context, 1.02, 1.0f / 72.0f);
+    r = m.update(s, config, context, 1.18, 1.0f / 72.0f);
     CHECK((r.buttons & n64::Z) != 0);
     s.lTrigger = 0.3f;
-    r = m.update(s, config, context, 1.04, 1.0f / 72.0f);
+    r = m.update(s, config, context, 1.19, 1.0f / 72.0f);
     CHECK((r.buttons & n64::Z) == 0);
     s.lTrigger = 0.45f;
-    r = m.update(s, config, context, 1.06, 1.0f / 72.0f);
+    r = m.update(s, config, context, 1.195, 1.0f / 72.0f);
     CHECK((r.buttons & n64::Z) == 0);
     // Right stick Y does nothing in VR (lesson 80).
     s = sampleIdle();
@@ -1776,6 +1782,504 @@ static void testCameraOriginSettings() {
     dk64vr_settings_free(&roundTrip);
 }
 
+// ---------------------------------------------------------------------------------------------
+// The Menu + View chord (standard.md section 1): resolved before Start, the View short press or
+// the recentre can act.
+
+struct ChordRun {
+    InputMapper m;
+    InputConfig config;
+    InputContext context;
+    double t = 5.0;
+    int fired = 0, starts = 0, toggles = 0, recentres = 0, applies = 0;
+    double firstStartS = -1.0, firedS = -1.0;
+    void frames(bool menu, bool view, double seconds) {
+        const double dt = 1.0 / 72.0;
+        for (double e = 0.0; e < seconds - 1e-9; e += dt) {
+            InputSample s = sampleIdle();
+            s.menu = menu;
+            s.view = view;
+            const InputResult r = m.update(s, config, context, t, float(dt));
+            if (r.vrMenuChord) {
+                fired++;
+                firedS = t;
+            }
+            if (r.buttons & n64::Start) {
+                starts++;
+                if (firstStartS < 0.0) {
+                    firstStartS = t;
+                }
+            }
+            toggles += (r.navHeld & nav::ToggleMenu) ? 1 : 0;
+            applies += (r.navHeld & nav::Apply) ? 1 : 0;
+            recentres += r.recentre ? 1 : 0;
+            t += dt;
+        }
+    }
+};
+
+static void testChord() {
+    {
+        // Menu tapped: Start is held back during the grace, then pulsed for at least 0.1 s.
+        ChordRun c;
+        c.context.stereoPlay = true;
+        c.frames(false, false, 0.1);
+        c.frames(true, false, 0.06);
+        CHECK(c.starts == 0);
+        c.frames(false, false, 0.5);
+        CHECK(c.starts >= 7 && c.starts <= 10);  // 0.12 s at 72 Hz
+        CHECK(c.fired == 0 && c.toggles == 0);
+    }
+    {
+        // Menu held: Start from 0.15 s on, for as long as it is held.
+        ChordRun c;
+        c.frames(false, false, 0.1);
+        const double down = c.t;
+        c.frames(true, false, 1.0);
+        CHECK(c.firstStartS >= down + 0.15 - 1e-9 && c.firstStartS < down + 0.17);
+        CHECK(c.starts >= 60);
+        CHECK(c.fired == 0);
+    }
+    {
+        // Both together for 0.5 s: the chord, once, and nothing else, even held 2 s (past the
+        // recentre) and on release.
+        ChordRun c;
+        c.frames(false, false, 0.1);
+        const double down = c.t;
+        c.frames(true, true, 2.0);
+        c.frames(false, false, 0.5);
+        CHECK(c.fired == 1);
+        CHECK(c.firedS >= down + 0.5 - 1e-9 && c.firedS < down + 0.52);
+        CHECK(c.starts == 0 && c.toggles == 0 && c.recentres == 0);
+    }
+    {
+        // View first, Menu 0.3 s later: the chord 0.5 s after Menu; no recentre at 1 s, no View
+        // short press on release, no Start.
+        ChordRun c;
+        c.frames(false, false, 0.1);
+        c.frames(false, true, 0.3);
+        const double menuDown = c.t;
+        c.frames(true, true, 1.5);
+        c.frames(false, false, 0.5);
+        CHECK(c.fired == 1 && c.firedS >= menuDown + 0.5 - 1e-9);
+        CHECK(c.starts == 0 && c.toggles == 0 && c.recentres == 0);
+    }
+    {
+        // Menu first, View 0.1 s later (inside the grace): the chord, no Start.
+        ChordRun c;
+        c.frames(false, false, 0.1);
+        c.frames(true, false, 0.1);
+        c.frames(true, true, 0.7);
+        c.frames(false, false, 0.3);
+        CHECK(c.fired == 1 && c.starts == 0 && c.toggles == 0);
+    }
+    {
+        // Let go early: nothing at all, also from the button still held.
+        ChordRun c;
+        c.frames(false, false, 0.1);
+        c.frames(true, true, 0.3);
+        c.frames(true, false, 1.0);
+        c.frames(false, false, 0.3);
+        c.frames(false, true, 1.2);  // a later View hold still recentres
+        CHECK(c.fired == 0 && c.starts == 0 && c.toggles == 0 && c.recentres == 1);
+    }
+    {
+        // View held past the recentre, then Menu: two separate actions, Start at once.
+        ChordRun c;
+        c.frames(false, false, 0.1);
+        c.frames(false, true, 1.2);
+        CHECK(c.recentres == 1);
+        const double menuDown = c.t;
+        c.frames(true, true, 0.3);
+        CHECK(c.fired == 0 && c.firstStartS >= menuDown - 1e-9 && c.firstStartS < menuDown + 0.02);
+    }
+    {
+        // Menu later than the grace: Start already passed, so no chord.
+        ChordRun c;
+        c.frames(false, false, 0.1);
+        c.frames(true, false, 0.3);
+        c.frames(true, true, 1.0);
+        CHECK(c.fired == 0 && c.starts > 0);
+    }
+    {
+        // In a recomp menu Menu is Apply: held back the same way, and the chord still works.
+        ChordRun c;
+        c.context.menuOpen = true;
+        c.frames(false, false, 0.1);
+        c.frames(true, true, 0.6);
+        c.frames(false, false, 0.3);
+        CHECK(c.fired == 1 && c.applies == 0 && c.toggles == 0);
+        c.frames(true, false, 0.3);
+        CHECK(c.applies > 0);
+    }
+    {
+        // Buttons held through a reset (focus came back with them down) do nothing.
+        ChordRun c;
+        c.frames(true, true, 1.0);
+        CHECK(c.fired == 0 && c.starts == 0);
+    }
+    {
+        // ignoreHeld: the B that closed a menu never reaches the game as C-right.
+        InputMapper m;
+        InputConfig config;
+        InputContext context;
+        InputSample s = sampleIdle();
+        s.b = true;
+        m.ignoreHeld(s);
+        CHECK((m.update(s, config, context, 1.0, 0.014f).buttons & n64::CRight) == 0);
+        CHECK((m.update(s, config, context, 1.1, 0.014f).buttons & n64::CRight) == 0);
+        s.b = false;
+        m.update(s, config, context, 1.2, 0.014f);
+        s.b = true;
+        CHECK((m.update(s, config, context, 1.3, 0.014f).buttons & n64::CRight) != 0);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The VR settings menu (src/vr/menu): tiles and rows against the settings registry.
+
+namespace {
+
+// The registry plus keys this build may not have (camera_lower, camera_closer).
+class ExtraSettings final : public menu::Settings {
+public:
+    ExtraSettings(dk64vr_settings_t *s, bool extra) : base(s), extra(extra) {}
+    bool has(const char *k) const override { return isExtra(k) ? extra : base.has(k); }
+    double get(const char *k) const override { return isExtra(k) ? value(k) : base.get(k); }
+    double def(const char *k) const override { return isExtra(k) ? 0.0 : base.def(k); }
+    double lo(const char *k) const override { return isExtra(k) ? 0.0 : base.lo(k); }
+    double hi(const char *k) const override { return isExtra(k) ? ((std::strcmp(k, "camera_closer") == 0) ? 0.8 : 1.0) : base.hi(k); }
+    void set(const char *k, double v) override {
+        if (isExtra(k)) {
+            (std::strcmp(k, "camera_lower") == 0 ? lower : closer) = v;
+        }
+        else {
+            base.set(k, v);
+        }
+    }
+    menu::StructSettings base;
+    bool extra;
+    double lower = 0.0, closer = 0.0;
+
+private:
+    static bool isExtra(const char *k) { return (std::strcmp(k, "camera_lower") == 0) || (std::strcmp(k, "camera_closer") == 0); }
+    double value(const char *k) const { return (std::strcmp(k, "camera_lower") == 0) ? lower : closer; }
+};
+
+bool contains(const std::vector<std::string> &v, const char *x) {
+    return std::find(v.begin(), v.end(), x) != v.end();
+}
+
+menu::Effects press(menu::Model &m, uint32_t bit, double &t) {
+    menu::Input in;
+    in.nowS = (t += 0.05);
+    in.navHeld = bit;
+    menu::Effects e = m.step(in, menu::Pointer(), menu::Layout());
+    in.nowS = (t += 0.05);
+    in.navHeld = 0;
+    const menu::Effects e2 = m.step(in, menu::Pointer(), menu::Layout());
+    e.close = e.close || e2.close;
+    e.recentre = e.recentre || e2.recentre;
+    return e;
+}
+
+}
+
+static void testWorldSize() {
+    // DK64's 25.2-unit Donkey Kong: world_scale 15 makes him 1.68 m ("DK 1.7 m").
+    CHECK_NEAR(menu::dkHeightFromScale(15.0), 1.68, 1e-12);
+    CHECK(menu::dkHeightText(15.0) == "DK 1.7 m");
+    CHECK(menu::dkHeightText(menu::scaleFromDkHeight(0.8)) == "DK 80 cm");
+    CHECK(std::string(menu::dkHeightCompare(15.0)) == "About as tall as you");
+    CHECK(std::string(menu::dkHeightCompare(menu::scaleFromDkHeight(5.0))) == "Giant");
+    // Round trip for every preset; stepping walks them in order in both directions.
+    const std::vector<double> p = menu::dkHeightPresets(4.0, 100.0);
+    CHECK(p.size() == 16 && p.front() == 0.5 && p.back() == 6.0);
+    std::vector<std::string> texts;
+    for (size_t i = 0; i < p.size(); i++) {
+        const double sc = menu::scaleFromDkHeight(p[i]);
+        CHECK_NEAR(menu::dkHeightFromScale(sc), p[i], 1e-12);
+        texts.push_back(menu::dkHeightText(sc));
+        if (i + 1 < p.size()) {
+            CHECK_NEAR(menu::stepWorldScale(sc, 1, 4.0, 100.0), menu::scaleFromDkHeight(p[i + 1]), 1e-9);
+        }
+        if (i > 0) {
+            CHECK_NEAR(menu::stepWorldScale(sc, -1, 4.0, 100.0), menu::scaleFromDkHeight(p[i - 1]), 1e-9);
+        }
+    }
+    std::sort(texts.begin(), texts.end());
+    CHECK(std::unique(texts.begin(), texts.end()) == texts.end());  // every step reads differently
+    // The registry's range limits the presets: this build's world_scale floor of 5 stops at 5 m.
+    CHECK(menu::dkHeightPresets(5.0, 100.0).back() == 5.0);
+    const double top = menu::scaleFromDkHeight(5.0);
+    CHECK_NEAR(menu::stepWorldScale(top, 1, 5.0, 100.0), top, 0.0);
+    // From a value between presets (world_scale 20: 1.26 m) to the neighbours.
+    CHECK_NEAR(menu::stepWorldScale(20.0, 1, 5.0, 100.0), menu::scaleFromDkHeight(1.4), 1e-9);
+    CHECK_NEAR(menu::stepWorldScale(20.0, -1, 5.0, 100.0), menu::scaleFromDkHeight(1.2), 1e-9);
+}
+
+static void testMenuModel() {
+    dk64vr_settings_t s;
+    std::memset(&s, 0, sizeof(s));
+    dk64vr_settings_defaults(&s);
+    ExtraSettings access(&s, false);
+    menu::Facts facts;
+    facts.displayHz = 72.0;
+    facts.recommendedEye = 1728;
+    menu::Model m(access, facts);
+    double t = 10.0;
+    m.open(t, 0);
+
+    // C: the approved tiles plus World size, Recentre on top, All VR settings below.
+    CHECK(m.screen() == menu::Screen::Quick);
+    const std::vector<std::string> tiles = m.visibleRows();
+    CHECK(tiles == std::vector<std::string>({ "turn_mode", "snap_angle", "world_size", "camera_smoothing", "hud_distance", "foveation" }));
+    CHECK(m.stops().front() == "recentre" && m.stops().back() == "all");
+    CHECK(m.focusedAct() == "row:turn_mode");
+    const std::string quick = m.render(false);
+    CHECK(quick.find("Quick VR settings") != std::string::npos);
+    CHECK(quick.find("data-act=\"set:turn_mode:1\"") != std::string::npos);
+    CHECK(quick.find("data-act=\"set:turn_mode:2\"") == std::string::npos);  // the tile offers Snap and Smooth
+    CHECK(quick.find("DK 1.7 m") != std::string::npos);
+    CHECK(quick.find("data-act=\"all\"") != std::string::npos);
+
+    // Tile to key: Right on Turning is Smooth; snap angle then dims and leaves the focus order.
+    press(m, nav::Right, t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "turn_mode"), 1.0, 0.0);
+    CHECK(!contains(m.stops(), "row:snap_angle"));
+    CHECK(m.render(false).find("Only with Snap turning.") != std::string::npos);
+    press(m, nav::Left, t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "turn_mode"), 0.0, 0.0);
+    press(m, nav::Down, t);
+    CHECK(m.focusedAct() == "row:snap_angle");
+    press(m, nav::Right, t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 60.0, 0.0);
+    // World size: Right makes Donkey Kong taller (a smaller world_scale), Left back.
+    press(m, nav::Down, t);
+    CHECK(m.focusedAct() == "row:world_size");
+    press(m, nav::Right, t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), menu::scaleFromDkHeight(1.8), 1e-4);
+    CHECK(m.valueText("world_size") == "DK 1.8 m");
+    press(m, nav::Left, t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 15.0, 1e-4);
+    // HUD distance steps by 0.1 m; Foveation by level.
+    press(m, nav::Down, t);
+    press(m, nav::Down, t);
+    CHECK(m.focusedAct() == "row:hud_distance");
+    press(m, nav::Right, t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.6, 1e-6);
+    press(m, nav::Down, t);
+    press(m, nav::Left, t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "foveation"), 2.0, 0.0);
+    // Every change was recorded for the host, in order.
+    CHECK(access.base.changes.size() == 7);
+    CHECK(access.base.changes.front().key == "turn_mode" && access.base.changes.back().key == "foveation");
+
+    // Recentre (top button) and close (B on C).
+    menu::Effects e = m.act("recentre", t);
+    CHECK(e.recentre && !e.close);
+    e = press(m, nav::Back, t);
+    CHECK(e.close);
+
+    // B from "All VR settings...": Comfort, with world size; camera lower/closer hide until
+    // their keys exist.
+    m.open(t, 0);
+    m.act("all", t);
+    CHECK(m.screen() == menu::Screen::Full && m.tab() == menu::Tab::Comfort);
+    std::vector<std::string> comfort = m.visibleRows();
+    CHECK(contains(comfort, "world_size") && !contains(comfort, "camera_lower") && !contains(comfort, "camera_closer"));
+    CHECK(m.focusedAct() == "row:turn_mode");
+    {
+        ExtraSettings more(&s, true);
+        menu::Model m2(more, facts);
+        m2.open(t, 0);
+        m2.act("all", t);
+        comfort = m2.visibleRows();
+        CHECK(contains(comfort, "camera_lower") && contains(comfort, "camera_closer"));
+        menu::Pointer p;
+        p.on = true;
+        p.down = true;
+        p.act = "slider:camera_closer";
+        p.trackLeft = 100.0f;
+        p.trackWidth = 400.0f;
+        p.x = 300.0f;
+        menu::Input in;
+        in.nowS = t + 0.1;
+        m2.step(in, p, menu::Layout());
+        CHECK_NEAR(more.closer, 0.4, 1e-9);
+    }
+
+    // Bumpers cycle the five tabs and wrap; the standard's order.
+    const menu::Tab order[] = { menu::Tab::Controls, menu::Tab::Hud, menu::Tab::Display, menu::Tab::Room, menu::Tab::Comfort };
+    for (menu::Tab want : order) {
+        press(m, nav::TabRight, t);
+        CHECK(m.tab() == want);
+    }
+    press(m, nav::TabLeft, t);
+    CHECK(m.tab() == menu::Tab::Room);
+
+    // No diagnostics anywhere; the measured rate on Display.
+    for (int tab = 0; tab < int(menu::Tab::Count); tab++) {
+        m.showFull(menu::Tab(tab));
+        const std::string page = m.render(false);
+        CHECK(page.find("diag") == std::string::npos && page.find("dump") == std::string::npos && page.find("timing") == std::string::npos);
+        if (menu::Tab(tab) == menu::Tab::Display) {
+            CHECK(page.find("72.0 Hz") != std::string::npos);
+            CHECK(page.find("per-app setting") != std::string::npos);
+        }
+    }
+
+    // Defaults: the first press arms, a second within 3 s resets this tab only.
+    m.showFull(menu::Tab::Hud);
+    m.act("step:hud_distance:1", t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.7, 1e-6);
+    m.act("def", t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.7, 1e-6);
+    CHECK(m.render(false).find("Reset HUD &amp; menus?") != std::string::npos);
+    m.act("def", t + 1.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.5, 1e-9);
+    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 60.0, 0.0);  // Comfort untouched
+    // An armed Defaults lapses after 3 s.
+    m.act("step:hud_distance:1", t + 2.0);
+    m.act("def", t + 2.0);
+    menu::Input idle;
+    idle.nowS = t + 5.1;
+    m.step(idle, menu::Pointer(), menu::Layout());
+    m.act("def", t + 5.2);
+    CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.6, 1e-6);
+    m.act("def", t + 5.3);
+    CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.5, 1e-9);
+    t += 6.0;
+    // Comfort's Defaults covers the virtual rows' keys and world_scale.
+    const std::vector<std::string> keys = m.tabKeys(menu::Tab::Comfort);
+    CHECK(contains(keys, "move_from_view") && contains(keys, "move_relative") && contains(keys, "world_scale") && !contains(keys, "hud_distance"));
+    m.showFull(menu::Tab::Comfort);
+    m.act("def", t);
+    m.act("def", t + 0.1);
+    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 45.0, 0.0);
+
+    // Dependent rows: the game camera on the right stick disables Turning, with the reason.
+    m.act("set:right_stick_x:1", t);
+    CHECK(m.render(false).find("Right stick is the game camera.") != std::string::npos);
+    CHECK(!contains(m.stops(), "row:turn_mode"));
+    m.act("set:turn_mode:1", t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "turn_mode"), 0.0, 0.0);
+    m.act("set:right_stick_x:0", t);
+
+    // "Left stick walks toward": Camera is move_from_view off; a hand is move_relative.
+    m.act("set:move_ref:3", t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "move_from_view"), 0.0, 0.0);
+    m.act("set:move_ref:1", t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "move_from_view"), 1.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "move_relative"), 1.0, 0.0);
+
+    // Automatic resolution off keeps today's eye size (2160 / 1728 = 1.25), on is "auto".
+    m.showFull(menu::Tab::Display);
+    m.act("tog:res_auto", t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), 1.25, 1e-6);
+    CHECK(m.render(false).find("2160 \xc3\x97 2160 per eye") != std::string::npos);
+    m.act("tog:res_auto", t);
+    CHECK_NEAR(dk64vr_settings_get(&s, "resolution_scale"), DK64VR_RESOLUTION_AUTO, 0.0);
+
+    // The pointer: a click on a segment sets it; holding does not repeat; a slider drags.
+    m.showFull(menu::Tab::Controls);
+    menu::Pointer p;
+    p.on = true;
+    p.act = "slider:haptics";
+    p.trackLeft = 200.0f;
+    p.trackWidth = 600.0f;
+    p.x = 500.0f;
+    p.down = true;
+    menu::Input in;
+    in.nowS = (t += 0.1);
+    m.step(in, p, menu::Layout());
+    CHECK_NEAR(dk64vr_settings_get(&s, "haptics"), 0.5, 1e-6);
+    p.x = 9999.0f;  // dragged past the end
+    in.nowS = (t += 0.1);
+    m.step(in, p, menu::Layout());
+    CHECK_NEAR(dk64vr_settings_get(&s, "haptics"), 1.0, 1e-6);
+    p.down = false;
+    m.step(in, p, menu::Layout());
+    p.act = "set:dominant_hand:1";
+    p.down = true;
+    in.nowS = (t += 0.1);
+    m.step(in, p, menu::Layout());
+    CHECK_NEAR(dk64vr_settings_get(&s, "dominant_hand"), 1.0, 0.0);
+    CHECK(!m.padMode());
+    in.nowS = (t += 0.1);
+    p.act = "set:dominant_hand:0";
+    m.step(in, p, menu::Layout());  // still held: no second click
+    CHECK_NEAR(dk64vr_settings_get(&s, "dominant_hand"), 1.0, 0.0);
+
+    // Scrolling: the pad focus is kept in view once the render showing it has been laid out.
+    {
+        dk64vr_settings_t ss;
+        std::memset(&ss, 0, sizeof(ss));
+        dk64vr_settings_defaults(&ss);
+        menu::StructSettings sa(&ss);
+        menu::Model sm(sa, facts);
+        sm.open(0.0, 0);
+        sm.act("all", 0.0);
+        const auto layoutNow = [&]() {
+            menu::Layout l;
+            l.valid = true;
+            l.viewHeight = 674.0f;
+            l.contentHeight = 12.0f + 13.0f * 120.0f + 24.0f;
+            l.focusValid = sm.focusIndex() >= 1;
+            l.focusTop = 12.0f + float(sm.focusIndex() - 1) * 120.0f;
+            l.focusBottom = l.focusTop + 118.0f;
+            return l;
+        };
+        double tt = 1.0;
+        for (int i = 0; i < 9; i++) {
+            menu::Input in;
+            in.nowS = (tt += 0.05);
+            in.navHeld = nav::Down;
+            sm.step(in, menu::Pointer(), layoutNow());
+            sm.render(false);
+            sm.dirty = false;  // the UI drew it
+            in.navHeld = 0;
+            for (int k = 0; k < 2; k++) {
+                in.nowS = (tt += 0.05);
+                sm.step(in, menu::Pointer(), layoutNow());
+                sm.render(false);
+                sm.dirty = false;
+            }
+            const menu::Layout l = layoutNow();
+            if (!(l.focusTop >= sm.scrollPx() - 1.0f && l.focusBottom <= sm.scrollPx() + l.viewHeight + 1.0f)) std::printf("scroll i=%d focus=%d top=%.0f scroll=%.0f\n", i, sm.focusIndex(), l.focusTop, sm.scrollPx());
+            CHECK(l.focusTop >= sm.scrollPx() - 1.0f && l.focusBottom <= sm.scrollPx() + l.viewHeight + 1.0f);
+        }
+        CHECK(sm.scrollPx() > 300.0f);
+        CHECK(sm.scrollPx() <= 12.0f + 13.0f * 120.0f + 24.0f - 674.0f + 1e-3f);
+    }
+
+    // The host applies and saves the recorded changes: they survive format and parse (lesson 64).
+    const char *file = "version = 1\n[vr]\nmy_own_key = 3\n";
+    dk64vr_settings_t disk;
+    std::memset(&disk, 0, sizeof(disk));
+    dk64vr_settings_defaults(&disk);
+    dk64vr_settings_parse(&disk, file, std::strlen(file));
+    for (const menu::StructSettings::Change &c : access.base.changes) {
+        dk64vr_settings_set(&disk, c.key.c_str(), c.value);
+    }
+    size_t len = 0;
+    char *text = dk64vr_settings_format(&disk, &len);
+    CHECK(text != nullptr && std::strstr(text, "my_own_key = 3") != nullptr);
+    dk64vr_settings_t back;
+    std::memset(&back, 0, sizeof(back));
+    dk64vr_settings_defaults(&back);
+    if (text != nullptr) {
+        dk64vr_settings_parse(&back, text, len);
+    }
+    const char *checked[] = { "haptics", "dominant_hand", "move_relative", "move_from_view", "resolution_scale", "hud_distance", "world_scale", "snap_angle", "foveation" };
+    for (const char *k : checked) {
+        CHECK_NEAR(back.file_values[dk64vr_settings_index(k)], dk64vr_settings_get(&s, k), 1e-6);
+    }
+    std::free(text);
+    dk64vr_settings_free(&disk);
+    dk64vr_settings_free(&back);
+}
+
 int main() {
     testEyeProjectionMatchesGuPerspective();
     testEyeProjectionAsymmetricEdges();
@@ -1820,6 +2324,9 @@ int main() {
     testCameraOriginComposition();
     testWorldScaleConsumers();
     testCameraOriginSettings();
+    testChord();
+    testWorldSize();
+    testMenuModel();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

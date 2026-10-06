@@ -24,6 +24,10 @@ void hostShutdown();
 // diagnostics' autostart presses) into the real pad's input.
 void hostFilterInput(int player, uint16_t *buttons, float *x, float *y);
 
+// From the launcher's init callback (recompui's UI thread, src/main/main.cpp): loads the VR
+// settings menu's document (assets/vr_menu.rml).
+void hostUiInit();
+
 // The game's Rumble Pak motor (ultramodern set_rumble), as controller haptics.
 void hostSetRumble(int channel, bool on);
 
