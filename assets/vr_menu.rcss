@@ -86,6 +86,8 @@ div, span { box-sizing: border-box; }
     pointer-events: none;
 }
 .vc-tile.focus, .vb-row.focus { background-color: rgba(247, 158, 8, 0.08); }
+/* Rows have no fixed height, so their focus is their own border (no layout shift). */
+.vb-row.focus { border-color: rgb(247, 158, 8); animation: 0.75s sine-in-out infinite alternate pulse; }
 
 /* ---- segmented choice ---- */
 .p-seg {
@@ -175,8 +177,8 @@ div, span { box-sizing: border-box; }
     border-color: rgba(255, 255, 255, 0.1);
 }
 .p-step.fill { width: 100%; }
-.p-step.fill .sbt { width: 108px; height: 92px; line-height: 92px; }
-.p-step.fill .out { flex: 1 1 0px; min-width: 0px; font-size: 36px; line-height: 92px; }
+.p-step.fill .sbt { width: 108px; height: 104px; line-height: 104px; }
+.p-step.fill .out { flex: 1 1 0px; min-width: 0px; font-size: 36px; line-height: 104px; }
 .p-extra { margin-left: 22px; font-size: 26px; font-weight: 500; color: rgb(204, 204, 204); white-space: nowrap; }
 
 /* ---- read-only info ---- */
@@ -283,7 +285,8 @@ div, span { box-sizing: border-box; }
 .vc-tile:first-child { margin-left: 0px; }
 .vc-tile .ring { border-radius: 24px; }
 .vc-tt { display: flex; flex-direction: row; align-items: center; justify-content: space-between; height: 44px; }
-.vc-val { font-size: 32px; font-weight: 600; line-height: 1; color: rgb(167, 191, 241); white-space: nowrap; margin-left: 16px; }
+.vc-tt .p-label { font-size: 31px; white-space: nowrap; }
+.vc-val { font-size: 30px; font-weight: 600; line-height: 1; color: rgb(167, 191, 241); white-space: nowrap; margin-left: 16px; }
 .vc-ctl { margin-top: 18px; }
 .vc-sub { margin-top: 14px; font-size: 26px; line-height: 1.3; color: rgb(204, 204, 204); white-space: nowrap; }
 .vc-sub.why { color: rgb(255, 215, 148); }
@@ -325,7 +328,7 @@ div, span { box-sizing: border-box; }
     border-color: rgba(255, 255, 255, 0.1);
 }
 .vb-top .chip { margin-left: 24px; }
-.vb-body { flex: 1 1 0px; display: flex; flex-direction: row; }
+.vb-body { height: 792px; display: flex; flex-direction: row; }
 .vb-rail {
     width: 440px;
     display: flex;
@@ -354,7 +357,7 @@ div, span { box-sizing: border-box; }
 .vb-tab.on { background-color: rgba(255, 255, 255, 0.1); color: rgb(255, 255, 255); }
 .vb-tab .mark { position: absolute; left: 10px; top: 22px; bottom: 22px; width: 6px; border-radius: 3px; }
 .vb-tab.on .mark { background-color: rgb(247, 158, 8); }
-.vb-main { flex: 1 1 0px; display: flex; flex-direction: column; }
+.vb-main { flex: 1 1 0px; height: 792px; }
 .vb-head {
     position: relative;
     display: flex;
@@ -366,20 +369,23 @@ div, span { box-sizing: border-box; }
     border-bottom-width: 2px;
     border-color: rgba(255, 255, 255, 0.1);
 }
-.vb-list { position: relative; flex: 1 1 0px; overflow: hidden; }
-.vb-in { position: relative; padding: 12px 22px 24px 22px; }
+.vb-list { position: relative; height: 676px; overflow: hidden; }
+.vb-in { padding: 12px 22px 24px 22px; }
 .vb-row {
     position: relative;
     display: flex;
     flex-direction: row;
     align-items: center;
     min-height: 116px;
-    padding: 18px 26px;
+    padding: 14px 22px;
     margin-top: 2px;
+    border-width: 4px;
+    border-color: rgba(0, 0, 0, 0);
     border-radius: 18px;
 }
 .vb-row.wide { flex-direction: column; align-items: flex-start; }
-.vb-row.wide .vb-ctl { width: 100%; margin-left: 0px; margin-top: 18px; }
+.vb-row.wide .vb-text { flex: none; width: 100%; }
+.vb-row.wide .vb-ctl { width: 100%; margin-left: 0px; margin-top: 18px; flex-direction: column; align-items: flex-start; }
 .vb-text { flex: 1 1 0px; }
 .vb-ctl { width: 760px; margin-left: 36px; display: flex; flex-direction: row; align-items: center; }
 .vb-row.dis .vb-ctl { opacity: 0.35; }

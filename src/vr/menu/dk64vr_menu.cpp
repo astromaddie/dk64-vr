@@ -1181,7 +1181,7 @@ std::string Model::renderFull() const {
     out += "<div class=\"" + dc + "\" data-act=\"def\">" + (armed ? ("Reset " + std::string(TabNames[int(curTab)]) + "?") : std::string("Defaults")) + (focused == "def" ? Ring : "") + "</div></div>";
 
     char style[64];
-    std::snprintf(style, sizeof(style), " style=\"top: %.0fpx;\"", -scroll);
+    std::snprintf(style, sizeof(style), " style=\"margin-top: %.0fpx;\"", -scroll);  // in flow, so the list clips it
     out += std::string("<div class=\"vb-list\" id=\"list\"><div class=\"vb-in\" id=\"listin\"") + style + ">";
     for (const std::string &id : visibleRows()) {
         const Row &r = *row(id);
@@ -1200,7 +1200,7 @@ std::string Model::renderFull() const {
             desc += " Turning it on applies next launch.";
         }
         out += std::string("</div><div class=\"p-desc") + ((en || r.coming) ? "" : " why") + "\">" + desc + "</div></div>";
-        out += "<div class=\"vb-ctl\">" + renderRowControl(r, false) + "</div>" + (isFocus ? Ring : "") + "</div>";
+        out += "<div class=\"vb-ctl\">" + renderRowControl(r, false) + "</div></div>";
     }
     out += "</div></div></div></div><div class=\"vb-foot\">" + renderHints(true) + "</div></div>";
     return out;

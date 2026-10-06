@@ -1163,6 +1163,12 @@ public:
         return panelAcquiredUiOnly;
     }
 
+    // VI thread: the game is paused while the VR menu is open, so no workload brings a present;
+    // RT64 then presents on every VI tick so recompui keeps drawing the menu.
+    bool presentWithoutWorkloads() override {
+        return vrMenuShown.load();
+    }
+
     void panelRelease() override {
         if (!panelChain.acquired) {
             panelMutex.unlock();
