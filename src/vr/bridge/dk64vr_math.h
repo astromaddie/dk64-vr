@@ -77,12 +77,15 @@ Mat4 orbitView(const Mat4 &view, float targetHeadingRad, float pivotDistance, fl
 Mat4 orbitViewBy(const Mat4 &view, float deltaRad, float pivotDistance);
 // Orbit about an explicit world-space look-at target (used by the adjusted head origin).
 Mat4 orbitViewAround(const Mat4 &view, float deltaRad, const Vec3 &pivot);
-// Closer first along eye -> target, then lower the remaining height to the target. Every
-// coordinate stays between eye and target; no collision query. Zero settings return view
-// verbatim. Lowering adjusts the inherited pitch toward the target while preserving heading;
-// levelView still removes that pitch when level_pitch is on.
+// Signed native-camera adjustment shared with sfvr_camera_origin. Positive values move closer
+// and lower toward the target; negative values extend farther and higher. Zero returns view
+// verbatim. Lowering/raising adjusts inherited pitch while preserving heading; levelView still
+// removes that pitch when level_pitch is on. Native collision is a separate engine-side query.
 Vec3 thirdPersonOrigin(const Vec3 &eye, const Vec3 &at, float lower, float closer);
 Mat4 thirdPersonView(const Mat4 &view, const Vec3 &at, float lower, float closer);
+// Negative settings extend the camera beyond its native position. The renderer cannot run the
+// game's LOS resolver safely, so those values remain saved but use the untouched native view.
+bool cameraOffsetCanRenderWithoutNativeCollision(float lower, float closer);
 float wrapAngle(float radians);  // to -pi..pi
 
 // 3D cinema (standard.md section 4, lessons 45 and 82). The game camera's picture goes on a

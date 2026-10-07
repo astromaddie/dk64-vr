@@ -1,5 +1,6 @@
 #include "dk64vr_math.h"
 #include "shared/rt64_projection_fog.h"
+#include "sfvr/sfvr_camera.h"
 
 #include <algorithm>
 #include <cmath>
@@ -224,19 +225,23 @@ Mat4 orbitViewAround(const Mat4 &view, float d, const Vec3 &pivot) {
 }
 
 Vec3 thirdPersonOrigin(const Vec3 &eye, const Vec3 &at, float lower, float closer) {
-    lower = std::clamp(lower, 0.0f, 1.0f);
-    closer = std::clamp(closer, 0.0f, 0.8f);
     if (lower == 0.0f && closer == 0.0f) {
         return eye;
     }
-    Vec3 p = { eye.x + closer * (at.x - eye.x), eye.y + closer * (at.y - eye.y), eye.z + closer * (at.z - eye.z) };
-    p.y += lower * (at.y - p.y);
-    return p;
+    const float source[3] = { eye.x, eye.y, eye.z };
+    const float target[3] = { at.x, at.y, at.z };
+    float adjusted[3];
+    sfvr_camera_origin(source, target, closer, lower, adjusted);
+    return { adjusted[0], adjusted[1], adjusted[2] };
+}
+
+bool cameraOffsetCanRenderWithoutNativeCollision(float lower, float closer) {
+    return (lower >= 0.0f) && (closer >= 0.0f);
 }
 
 Mat4 thirdPersonView(const Mat4 &view, const Vec3 &at, float lower, float closer) {
-    lower = std::clamp(lower, 0.0f, 1.0f);
-    closer = std::clamp(closer, 0.0f, 0.8f);
+    lower = std::clamp(lower, SFVR_CAMERA_LOWER_MIN, SFVR_CAMERA_LOWER_MAX);
+    closer = std::clamp(closer, SFVR_CAMERA_CLOSER_MIN, SFVR_CAMERA_CLOSER_MAX);
     if (lower == 0.0f && closer == 0.0f) {
         return view; // Preserve the complete default camera path, including float bits.
     }

@@ -23,7 +23,7 @@ double StructSettings::get(const char *key) const {
 
 double StructSettings::def(const char *key) const {
     const int i = dk64vr_settings_index(key);
-    return (i >= 0) ? dk64vr_settings_default(size_t(i)) : 0.0;
+    return (i >= 0) ? dk64vr_settings_default_for_profile(s, key) : 0.0;
 }
 
 double StructSettings::lo(const char *key) const {
@@ -202,6 +202,8 @@ std::vector<Row> buildRows() {
     using W = When;
     const Tab C = Tab::Comfort, Ct = Tab::Controls, H = Tab::Hud, D = Tab::Display, R = Tab::Room;
     std::vector<Row> rows = {
+        { "defaults_profile", "defaults_profile", C, "Default profile", K::Seg, { { 0, "Standard", nullptr }, { 1, "Frame personal", "Frame" } }, 0, 0, 0, F::None,
+          "Choose the defaults used by Reset. Saved choices stay as they are.", W::Always, false, Virt::None, nullptr },
         { "turn_mode", "turn_mode", C, "Turning", K::Seg, { { 0, "Snap", nullptr }, { 1, "Smooth", nullptr }, { 2, "Off", nullptr } }, 0, 0, 0, F::None,
           "How the right stick turns you in third-person play. Snap is one instant step.", W::TurnOn, false, Virt::None, "Right stick, third-person play" },
         { "snap_angle", "snap_angle", C, "Snap angle", K::Seg, { { 15, "15\xc2\xb0", nullptr }, { 30, "30\xc2\xb0", nullptr }, { 45, "45\xc2\xb0", nullptr }, { 60, "60\xc2\xb0", nullptr }, { 90, "90\xc2\xb0", nullptr } }, 0, 0, 0, F::None,
@@ -216,10 +218,10 @@ std::vector<Row> buildRows() {
           "Push forward and DK walks where this points.", W::Always, false, Virt::MoveRef, nullptr },
         { "world_size", "world_scale", C, "World size", K::Height, {}, 0, 0, 0, F::None,
           "How tall Donkey Kong stands. You are about 1.7 m.", W::Always, false, Virt::None, nullptr },
-        { "camera_lower", "camera_lower", C, "Lower camera", K::Slider, {}, 0, 1, 0.05, F::Pct,
-          "Brings the view down toward Donkey Kong's eye height.", W::Always, false, Virt::None, nullptr },
-        { "camera_closer", "camera_closer", C, "Camera closer", K::Slider, {}, 0, 0.8, 0.05, F::Pct,
-          "Moves the view in toward Donkey Kong.", W::Always, false, Virt::None, nullptr },
+        { "camera_lower", "camera_lower", C, "Lower camera", K::Slider, {}, -1, 1, 0.05, F::Pct,
+          "Positive moves lower; negative values are saved while the native camera stays in place until collision checks support extension.", W::Always, false, Virt::None, nullptr },
+        { "camera_closer", "camera_closer", C, "Camera closer", K::Slider, {}, -1, 0.8, 0.05, F::Pct,
+          "Positive moves closer; negative values are saved while the native camera stays in place until collision checks support extension.", W::Always, false, Virt::None, nullptr },
         { "camera_smoothing", "camera_smoothing", C, "Camera smoothing", K::Seg, { { 0, "Off", nullptr }, { 1, "Low", nullptr }, { 2, "Medium", "Med" }, { 3, "High", nullptr } }, 0, 0, 0, F::None,
           "Calms the game camera's follow motion so the world drifts less.", W::Always, false, Virt::None, "Eases the game camera's swings" },
         { "level_pitch", "level_pitch", C, "Level horizon", K::Toggle, {}, 0, 0, 0, F::None,
@@ -254,6 +256,8 @@ std::vector<Row> buildRows() {
           "Where this panel and the game's menus appear.", W::Always, false, Virt::None, nullptr },
         { "panel_width", "panel_width", H, "Menu width", K::Stepper, {}, 0.5, 10, 0.1, F::Metres,
           "Wider is easier to read, narrower is easier to take in.", W::Always, false, Virt::None, nullptr },
+        { "settings_page_side", "settings_page_side", H, "Settings panel side", K::Seg, { { 0, "Centre", nullptr }, { 1, "Left", nullptr }, { 2, "Right", nullptr } }, 0, 0, 0, F::None,
+          "Where the settings panel sits around you while it is open.", W::Always, false, Virt::None, nullptr },
 
         { "_rate", nullptr, D, "Display rate", K::Info, {}, 0, 0, 0, F::None,
           "Read only.", W::Always, false, Virt::None, nullptr },
@@ -610,7 +614,9 @@ std::vector<std::string> Model::tabKeys(Tab tab) const {
             add("move_from_view");
         }
 
-        add(r.key);
+        if ((r.key == nullptr) || (std::strcmp(r.key, "defaults_profile") != 0)) {
+            add(r.key);
+        }
     }
 
     return keys;
@@ -1080,9 +1086,11 @@ std::string Model::renderRowControl(const Row &r, bool tile) const {
                 { GA, "Jump, confirm" }, { GX, "Attack (N64 B)" }, { GY, "Camera left (C-left)" }, { GB, "Camera right (C-right)" },
                 { GLB, "Zoom (C-down)" }, { GRB, "First person (C-up)" }, { GLT, "Crouch (Z)" }, { GRT, "Centre camera (R), menu click" },
                 { GMENU, "Pause (Start)" }, { GVIEW, "Recomp menu; hold 1 s to recentre" }, { GLS, "Move" }, { GRSLR, "Turn" },
+                { "LGrip", "Hold with right stick: adjust size and camera" },
             };
+            constexpr size_t mapCount = sizeof(map) / sizeof(map[0]);
             out += "<div class=\"p-map\"><div class=\"mc\">";
-            for (size_t i = 0; i < 12; i++) {
+            for (size_t i = 0; i < mapCount; i++) {
                 if (i == 6) {
                     out += "</div><div class=\"mc\">";
                 }

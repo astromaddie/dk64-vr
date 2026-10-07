@@ -20,6 +20,7 @@ const ActionDef actionDefs[ActCount] = {
     { "menu", "Menu (Start, pause)", ActionKind::Boolean },
     { "view", "View (recomp menu; hold to recentre)", ActionKind::Boolean },
     { "l_bumper", "Left bumper (C-down)", ActionKind::Boolean },
+    { "l_grip", "Left grip (VR adjustment modifier)", ActionKind::Float },
     { "r_bumper", "Right bumper (C-up)", ActionKind::Boolean },
     { "l_stick_click", "Left stick click", ActionKind::Boolean },
     { "r_stick_click", "Right stick click (N64 L)", ActionKind::Boolean },
@@ -49,6 +50,7 @@ const Binding frameBindings[] = {
     { ActMenu, R_ "input/menu/click" },
     { ActView, L_ "input/view/click" },
     { ActLBumper, L_ "input/bumper/click" },
+    { ActLGrip, L_ "input/squeeze/value" },
     { ActRBumper, R_ "input/bumper/click" },
     { ActLStickClick, L_ "input/thumbstick/click" },
     { ActRStickClick, R_ "input/thumbstick/click" },
@@ -325,8 +327,13 @@ InputResult InputMapper::update(const InputSample &raw, const InputConfig &confi
         toggleReads = 2;
     }
 
-    if (events & (SFVR_VIEW_RECENTRE | SFVR_VIEW_RECALIBRATE_HEIGHT)) {
+    if (events & SFVR_VIEW_RECENTRE) {
         r.recentre = true;
+        r.systemBuzz = true;
+    }
+    if (events & SFVR_VIEW_RECALIBRATE_HEIGHT) {
+        r.recentre = true;
+        r.recalibrateHeight = true;
         r.systemBuzz = true;
     }
 

@@ -245,6 +245,23 @@ bool uiOpen(const dk64vr_settings_t &settings, const Facts &facts, double nowS, 
     return true;
 }
 
+void uiRefreshSettings(const dk64vr_settings_t &settings) {
+    State &s = state();
+    std::scoped_lock lock(s.m);
+    if (!s.open || !s.model) {
+        return;
+    }
+
+    // The menu owns a settings copy. Refresh it after host-side shortcuts so the open widgets
+    // reflect the persisted values without emitting changes back to the host.
+    char *raw = s.settings.raw;
+    const size_t raw_len = s.settings.raw_len;
+    s.settings = settings;
+    s.settings.raw = raw;
+    s.settings.raw_len = raw_len;
+    s.model->dirty = true;
+}
+
 void uiClose() {
     State &s = state();
     bool wasOpen;

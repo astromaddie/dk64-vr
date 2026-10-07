@@ -48,6 +48,7 @@ bool uiReady();
 // Opens the quick menu on a copy of the host's settings. False when the document is missing.
 bool uiOpen(const dk64vr_settings_t &settings, const Facts &facts, double nowS, uint32_t navHeld);
 void uiClose();
+void uiRefreshSettings(const dk64vr_settings_t &settings);
 bool uiIsOpen();
 void uiFrame(const FrameIn &in, const Facts &facts);
 FrameOut uiTake();

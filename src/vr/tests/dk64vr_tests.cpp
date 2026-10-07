@@ -20,6 +20,7 @@
 #include "shared/rt64_projection_fog.h"
 #include "shared/rt64_vr_billboard.h"
 #include "dk64vr_menu.h"
+#include "sfvr/sfvr_adjust.h"
 
 using namespace dk64vr;
 
@@ -527,7 +528,18 @@ static void testSettings() {
     CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 15.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.5, 1e-9);
     CHECK_NEAR(dk64vr_settings_get(&s, "turn_mode"), 0.0, 0.0);
-    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 45.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 30.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "defaults_profile"), 0.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "settings_page_side"), 2.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_default_for_profile(&s, "turn_mode"), 0.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_default_for_profile(&s, "snap_angle"), 30.0, 0.0);
+    dk64vr_settings_set(&s, "defaults_profile", 1.0);
+    CHECK_NEAR(dk64vr_settings_default_for_profile(&s, "turn_mode"), 1.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_default_for_profile(&s, "smooth_turn_speed"), 120.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_default_for_profile(&s, "snap_angle"), 30.0, 0.0);
+    dk64vr_settings_set(&s, "defaults_profile", 0.0);
+    const sfvr_setting_key *scaleKey = dk64vr_settings_key((size_t)dk64vr_settings_index("world_scale"));
+    CHECK(scaleKey != nullptr && scaleKey->min <= 15.0 / 4.0 && scaleKey->max >= 15.0 * 4.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "right_stick_x"), 0.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "cutscenes"), 0.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "level_pitch"), 1.0, 0.0);
@@ -905,8 +917,19 @@ static void testBindingPaths() {
             }
         }
     }
-    // The Frame is asymmetric: these must be on the hand the Frame has them on.
+    // The Frame modifier uses a Float action bound to the validated squeeze/value path.
     const ProfileBindings &frame = profileAt(0);
+    CHECK(actionDef(ActLGrip).kind == ActionKind::Float);
+    bool frameGripBound = false;
+    for (int b = 0; b < frame.count; b++) {
+        if (frame.bindings[b].action == ActLGrip) {
+            frameGripBound = true;
+            CHECK(std::strcmp(frame.bindings[b].path, "/user/hand/left/input/squeeze/value") == 0);
+        }
+    }
+    CHECK(frameGripBound);
+
+    // The Frame is asymmetric: these must be on the hand the Frame has them on.
     for (int b = 0; b < frame.count; b++) {
         const std::string path = frame.bindings[b].path;
         const bool left = path.find("/user/hand/left/") == 0;
@@ -1041,6 +1064,91 @@ static void testTurnAndView() {
     s.view = false;
     r = m.update(s, config, context, t += 0.1, 0.014f);
     CHECK((r.navHeld & nav::ToggleMenu) == 0 && !r.recentre);
+    s.view = true;
+    m.update(s, config, context, t += 0.1, 0.014f);
+    r = m.update(s, config, context, t += 3.1, 0.014f);
+    CHECK(r.recentre && r.recalibrateHeight && r.systemBuzz);
+    s.view = false;
+    r = m.update(s, config, context, t += 0.1, 0.014f);
+    CHECK(!r.recalibrateHeight);
+}
+
+static void testLiveAdjustment() {
+    sfvr_adjust_config config;
+    sfvr_adjust_config_default(&config);
+    CHECK_NEAR(config.deadzone, 0.20, 1e-6);
+    CHECK_NEAR(config.world_size_factor_per_s, 1.5, 1e-6);
+    CHECK_NEAR(config.camera_units_per_s, 0.25, 1e-6);
+    CHECK_NEAR(config.max_dt_s, 1.0 / 30.0, 1e-6);
+    config.world_scale_min = 25.0f;
+    config.world_scale_max = 400.0f;
+
+    sfvr_adjust_state state;
+    sfvr_adjust_init(&state);
+    float worldScale = 100.0f, closer = 0.0f, lower = 0.0f;
+    float stick[2] = { 1.0f, 1.0f };
+    CHECK(!sfvr_adjust_update(&state, &config, stick, 1, 1, 0, 0, 1.0, &worldScale, &closer, &lower));
+    CHECK_NEAR(stick[0], 0.0, 0.0);
+    CHECK_NEAR(stick[1], 0.0, 0.0);
+    stick[0] = stick[1] = 1.0f;
+    CHECK(sfvr_adjust_update(&state, &config, stick, 1, 1, 0, 0, 1.1, &worldScale, &closer, &lower));
+    CHECK_NEAR(worldScale, 100.0 * std::exp(-std::log(1.5) / 30.0), 1e-4);
+    CHECK_NEAR(closer, -0.25 / 30.0, 1e-5);
+    CHECK_NEAR(lower, -0.25 / 30.0, 1e-5);
+    CHECK_NEAR(stick[0], 0.0, 0.0);
+    CHECK_NEAR(stick[1], 0.0, 0.0);
+
+    // Menu and View win over the modifier while still consuming its right stick.
+    sfvr_adjust_init(&state);
+    worldScale = 100.0f; closer = lower = 0.0f;
+    stick[0] = 1.0f; stick[1] = 0.0f;
+    sfvr_adjust_update(&state, &config, stick, 1, 1, 0, 0, 2.0, &worldScale, &closer, &lower);
+    stick[0] = 1.0f;
+    CHECK(!sfvr_adjust_update(&state, &config, stick, 1, 1, 1, 0, 2.01, &worldScale, &closer, &lower));
+    CHECK_NEAR(worldScale, 100.0, 0.0);
+    CHECK_NEAR(stick[0], 0.0, 0.0);
+
+    // On release, a deflected stick remains muted until a neutral sample, then returns to gameplay.
+    sfvr_adjust_init(&state);
+    stick[0] = 0.8f; stick[1] = 0.0f;
+    sfvr_adjust_update(&state, &config, stick, 1, 1, 0, 0, 3.0, &worldScale, &closer, &lower);
+    stick[0] = 0.8f;
+    sfvr_adjust_update(&state, &config, stick, 0, 1, 0, 0, 3.01, &worldScale, &closer, &lower);
+    CHECK_NEAR(stick[0], 0.0, 0.0);
+    stick[0] = stick[1] = 0.0f;
+    sfvr_adjust_update(&state, &config, stick, 0, 1, 0, 0, 3.02, &worldScale, &closer, &lower);
+    stick[0] = 0.8f;
+    sfvr_adjust_update(&state, &config, stick, 0, 1, 0, 0, 3.03, &worldScale, &closer, &lower);
+    CHECK_NEAR(stick[0], 0.8, 1e-6);
+
+    sfvr_adjust_focus_lost(&state);
+    stick[0] = 0.8f;
+    sfvr_adjust_update(&state, &config, stick, 0, 1, 0, 0, 4.0, &worldScale, &closer, &lower);
+    CHECK_NEAR(stick[0], 0.0, 0.0);
+    stick[0] = stick[1] = 0.0f;
+    sfvr_adjust_update(&state, &config, stick, 0, 1, 0, 0, 4.01, &worldScale, &closer, &lower);
+    stick[0] = 0.8f;
+    sfvr_adjust_update(&state, &config, stick, 0, 1, 0, 0, 4.02, &worldScale, &closer, &lower);
+    CHECK_NEAR(stick[0], 0.8, 1e-6);
+
+    // Predicted-display-time integration gives the same scale change at the supported rates.
+    float scaleAtRate[3] = {};
+    const int rates[] = { 72, 90, 120 };
+    for (int r = 0; r < 3; r++) {
+        sfvr_adjust_init(&state);
+        worldScale = 100.0f; closer = lower = 0.0f;
+        stick[0] = 1.0f; stick[1] = 0.0f;
+        sfvr_adjust_update(&state, &config, stick, 1, 1, 0, 0, 0.0, &worldScale, &closer, &lower);
+        for (int frame = 1; frame <= rates[r]; frame++) {
+            stick[0] = 1.0f;
+            sfvr_adjust_update(&state, &config, stick, 1, 1, 0, 0,
+                double(frame) / rates[r], &worldScale, &closer, &lower);
+        }
+        scaleAtRate[r] = worldScale;
+    }
+    for (int r = 0; r < 3; r++) CHECK_NEAR(scaleAtRate[r], 100.0 / 1.5, 3e-4);
+    CHECK_NEAR(scaleAtRate[0], scaleAtRate[1], 2e-4);
+    CHECK_NEAR(scaleAtRate[1], scaleAtRate[2], 2e-4);
 }
 
 static void testMenuNavigation() {
@@ -1582,6 +1690,16 @@ static void testCameraOrigin() {
     CHECK_NEAR(close.y, eye.y + 0.8f * (at.y - eye.y), 1e-5);
     CHECK_NEAR(close.z, eye.z + 0.8f * (at.z - eye.z), 1e-5);
     CHECK_NEAR(thirdPersonOrigin(eye, at, 1, 0.8f).y, at.y, 1e-5);
+    const Vec3 far = thirdPersonOrigin(eye, at, 0, -0.5f);
+    CHECK_NEAR(far.x, eye.x - 0.5f * (at.x - eye.x), 1e-5);
+    CHECK_NEAR(far.y, eye.y - 0.5f * (at.y - eye.y), 1e-5);
+    CHECK_NEAR(far.z, eye.z - 0.5f * (at.z - eye.z), 1e-5);
+    const Vec3 high = thirdPersonOrigin(eye, at, -0.5f, 0);
+    CHECK_NEAR(high.x, eye.x, 1e-5);
+    CHECK_NEAR(high.z, eye.z, 1e-5);
+    CHECK(high.y > eye.y);
+    const Vec3 fartherHigher = thirdPersonOrigin(eye, at, -0.5f, -0.5f);
+    CHECK(fartherHigher.x > eye.x && fartherHigher.z > eye.z && fartherHigher.y > eye.y);
     // Re-aim inherited pitch when lowered; with level_pitch on the wearer still supplies pitch.
     const Mat4 lowered = thirdPersonView(view, at, 0.5f, 0.3f);
     const Vec3 atCamera = transformPoint(at, lowered);
@@ -1729,9 +1847,17 @@ static void testCameraOriginSettings() {
     for (const char *key : { "camera_lower", "camera_closer" }) {
         CHECK(dk64vr_settings_key(dk64vr_settings_index(key))->type == SFVR_SETTING_FLOAT);
     }
-    const char *text = "version = 1\n[vr]\nport_schema = 5\nworld_scale = 8\ncamera_lower = 0.5\ncamera_closer = 0.3\nsnap_angle = 60\nfuture_key = 123\n";
+    CHECK_NEAR(dk64vr_settings_key((size_t)dk64vr_settings_index("camera_lower"))->min, -1.0, 0);
+    CHECK_NEAR(dk64vr_settings_key((size_t)dk64vr_settings_index("camera_closer"))->min, -1.0, 0);
+    CHECK(cameraOffsetCanRenderWithoutNativeCollision(0.0f, 0.0f));
+    CHECK(cameraOffsetCanRenderWithoutNativeCollision(0.4f, 0.6f));
+    CHECK(!cameraOffsetCanRenderWithoutNativeCollision(-0.4f, 0.6f));
+    CHECK(!cameraOffsetCanRenderWithoutNativeCollision(0.4f, -0.6f));
+    const char *text = "version = 1\n[vr]\nport_schema = 5\nworld_scale = 8\ncamera_lower = -0.5\ncamera_closer = -0.3\nsnap_angle = 60\nfuture_key = 123\n";
     dk64vr_settings_parse(&s, text, strlen(text));
     for (size_t i = 0; i < dk64vr_settings_count(); i++) s.values[i] = s.file_values[i];
+    CHECK_NEAR(dk64vr_settings_get(&s, "camera_lower"), -0.5, 0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "camera_closer"), -0.3, 1e-6);
     CHECK_NEAR(dk64vr_settings_dk_height(&s), 3.15, 1e-9);
     CHECK_NEAR(dk64vr_settings_get(&s, "port_schema"), 5, 0); // additive keys: no default migration
     size_t length;
@@ -1751,13 +1877,13 @@ static void testCameraOriginSettings() {
         if (std::strcmp(key, "DK64_VR_CAMERA_CLOSER") == 0) return "0.6";
         return nullptr;
     }) == 3);
-    CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 4, 0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 4.0, 0);
     CHECK_NEAR(dk64vr_settings_dk_height(&s), 6.3, 1e-9);
     CHECK_NEAR(dk64vr_settings_get(&s, "camera_lower"), 0.75, 1e-6);
     CHECK_NEAR(dk64vr_settings_get(&s, "camera_closer"), 0.6, 1e-6);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 8, 0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_lower")], 0.5, 0);
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_closer")], 0.3, 1e-6);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_lower")], -0.5, 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_closer")], -0.3, 1e-6);
     for (const char *key : { "world_scale", "camera_lower", "camera_closer" }) {
         const sfvr_setting_key *range = dk64vr_settings_key(dk64vr_settings_index(key));
         dk64vr_settings_set(&s, key, -100);
@@ -1771,12 +1897,12 @@ static void testCameraOriginSettings() {
         if (std::strcmp(key, "DK64_VR_CAMERA_CLOSER") == 0) return "9";
         return nullptr;
     }) == 3);
-    CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 4, 0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "world_scale"), 3.75, 0);
     CHECK_NEAR(dk64vr_settings_get(&s, "camera_lower"), 1, 0);
     CHECK_NEAR(dk64vr_settings_get(&s, "camera_closer"), 0.8, 1e-6);
     const char *invalid = "[vr]\nport_schema = 5\nworld_scale = 0\ncamera_lower = nan\ncamera_closer = 5\n";
     dk64vr_settings_parse(&s, invalid, strlen(invalid));
-    CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 4, 0);
+    CHECK_NEAR(s.file_values[dk64vr_settings_index("world_scale")], 3.75, 0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_lower")], 0, 0);
     CHECK_NEAR(s.file_values[dk64vr_settings_index("camera_closer")], 0.8, 1e-6);
     dk64vr_settings_free(&s);
@@ -1948,7 +2074,7 @@ public:
     bool has(const char *k) const override { return isExtra(k) ? extra : base.has(k); }
     double get(const char *k) const override { return isExtra(k) ? value(k) : base.get(k); }
     double def(const char *k) const override { return isExtra(k) ? 0.0 : base.def(k); }
-    double lo(const char *k) const override { return isExtra(k) ? 0.0 : base.lo(k); }
+    double lo(const char *k) const override { return isExtra(k) ? -1.0 : base.lo(k); }
     double hi(const char *k) const override { return isExtra(k) ? ((std::strcmp(k, "camera_closer") == 0) ? 0.8 : 1.0) : base.hi(k); }
     void set(const char *k, double v) override {
         if (isExtra(k)) {
@@ -2054,7 +2180,7 @@ static void testMenuModel() {
     press(m, nav::Down, t);
     CHECK(m.focusedAct() == "row:snap_angle");
     press(m, nav::Right, t);
-    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 60.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 45.0, 0.0);
     // World size: Right makes Donkey Kong taller (a smaller world_scale), Left back.
     press(m, nav::Down, t);
     CHECK(m.focusedAct() == "row:world_size");
@@ -2089,7 +2215,7 @@ static void testMenuModel() {
     CHECK(m.screen() == menu::Screen::Full && m.tab() == menu::Tab::Comfort);
     std::vector<std::string> comfort = m.visibleRows();
     CHECK(contains(comfort, "world_size") && !contains(comfort, "camera_lower") && !contains(comfort, "camera_closer"));
-    CHECK(m.focusedAct() == "row:turn_mode");
+    CHECK(m.focusedAct() == "row:defaults_profile");
     {
         ExtraSettings more(&s, true);
         menu::Model m2(more, facts);
@@ -2107,7 +2233,7 @@ static void testMenuModel() {
         menu::Input in;
         in.nowS = t + 0.1;
         m2.step(in, p, menu::Layout());
-        CHECK_NEAR(more.closer, 0.4, 1e-9);
+        CHECK_NEAR(more.closer, -0.1, 1e-6);
     }
 
     // Bumpers cycle the five tabs and wrap; the standard's order.
@@ -2139,7 +2265,7 @@ static void testMenuModel() {
     CHECK(m.render(false).find("Reset HUD &amp; menus?") != std::string::npos);
     m.act("def", t + 1.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "hud_distance"), 1.5, 1e-9);
-    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 60.0, 0.0);  // Comfort untouched
+    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 45.0, 0.0);  // Comfort untouched
     // An armed Defaults lapses after 3 s.
     m.act("step:hud_distance:1", t + 2.0);
     m.act("def", t + 2.0);
@@ -2153,13 +2279,27 @@ static void testMenuModel() {
     t += 6.0;
     // Comfort's Defaults covers the virtual rows' keys and world_scale.
     const std::vector<std::string> keys = m.tabKeys(menu::Tab::Comfort);
-    CHECK(contains(keys, "move_from_view") && contains(keys, "move_relative") && contains(keys, "world_scale") && !contains(keys, "hud_distance"));
+    CHECK(contains(keys, "move_from_view") && contains(keys, "move_relative") && contains(keys, "world_scale")
+        && !contains(keys, "hud_distance") && !contains(keys, "defaults_profile"));
     m.showFull(menu::Tab::Comfort);
     m.act("def", t);
     m.act("def", t + 0.1);
-    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 45.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "snap_angle"), 30.0, 0.0);
+
+    // Selecting Frame personal leaves saved values alone, but Comfort reset uses its defaults.
+    m.act("set:turn_mode:0", t + 0.2);
+    m.act("set:defaults_profile:1", t + 0.3);
+    CHECK_NEAR(dk64vr_settings_get(&s, "turn_mode"), 0.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "defaults_profile"), 1.0, 0.0);
+    dk64vr_settings_set(&s, "smooth_turn_speed", 60.0);
+    m.act("def", t + 0.4);
+    m.act("def", t + 0.5);
+    CHECK_NEAR(dk64vr_settings_get(&s, "defaults_profile"), 1.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "turn_mode"), 1.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "smooth_turn_speed"), 120.0, 0.0);
 
     // Dependent rows: the game camera on the right stick disables Turning, with the reason.
+    m.act("set:turn_mode:0", t + 0.6);
     m.act("set:right_stick_x:1", t);
     CHECK(m.render(false).find("Right stick is the game camera.") != std::string::npos);
     CHECK(!contains(m.stops(), "row:turn_mode"));
@@ -2605,6 +2745,7 @@ int main() {
     testN64Map();
     testStickRelativeToView();
     testTurnAndView();
+    testLiveAdjustment();
     testMenuNavigation();
     testMerge();
     testLayerPoses();

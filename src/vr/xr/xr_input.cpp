@@ -229,6 +229,7 @@ InputSample XrInput::sample(bool focused, XrSpace space, XrTime time) {
     s.menu = getBool(ActMenu);
     s.view = getBool(ActView);
     s.lBumper = getBool(ActLBumper);
+    s.lGrip = getFloat(ActLGrip) >= 0.7f;
     s.rBumper = getBool(ActRBumper);
     s.lStickClick = getBool(ActLStickClick);
     s.rStickClick = getBool(ActRStickClick);

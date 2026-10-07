@@ -37,6 +37,7 @@ size_t dk64vr_settings_count(void);
 const sfvr_setting_key *dk64vr_settings_key(size_t index);
 int dk64vr_settings_index(const char *name); // -1 when unknown
 double dk64vr_settings_default(size_t index); // the registry default, or this port's
+double dk64vr_settings_default_for_profile(const dk64vr_settings_t *s, const char *name);
 
 // Defaults for every key; no file, no env.
 void dk64vr_settings_defaults(dk64vr_settings_t *s);

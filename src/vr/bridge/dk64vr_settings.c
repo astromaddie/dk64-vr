@@ -12,6 +12,8 @@ static const char *const right_stick_values[] = { "turn", "camera", NULL };
 static const char *const cutscene_values[] = { "cinema", "immersive", "panel", NULL };
 static const char *const foveation_values[] = { "off", "low", "medium", "high", NULL };
 static const char *const camera_smoothing_values[] = { "off", "low", "medium", "high", NULL };
+static const char *const defaults_profile_values[] = { "standard", "frame_personal", NULL };
+static const char *const settings_page_side_values[] = { "centre", "left", "right", NULL };
 
 // Keys that only this port has. The standard keys live in the sfvr registry.
 static const sfvr_setting_key port_keys[] = {
@@ -23,13 +25,16 @@ static const sfvr_setting_key port_keys[] = {
 	// Dump the actual shading-rate attachment with the eye dumps (or once if dump_frame=0).
 	{ "dump_foveation", SFVR_SETTING_BOOL, 0.0, 0.0, 1.0, NULL },
 	// Game units per metre. Donkey Kong's model spans 25.2 units ([vr] player extent, DK Isles),
-	// so 15 makes him about 1.7 m tall; docs/VR_ARCHITECTURE.md section 5.
-	{ "world_scale", SFVR_SETTING_FLOAT, 15.0, 4.0, 100.0, NULL },
+	// so 15 makes him about 1.7 m tall; docs/VR_ARCHITECTURE.md section 5. Keep the old
+	// 100-unit ceiling while extending the small end to 25% of baseline.
+	{ "world_scale", SFVR_SETTING_FLOAT, 15.0, 3.75, 100.0, NULL },
 	// Immersive eyes only: metres converted by world_scale; 0 restores the game's near for A/B.
 	{ "eye_near_m", SFVR_SETTING_FLOAT, 0.1, 0.0, 0.25, NULL },
-	// Third-person head origin only; the game camera and its collision are unchanged.
-	{ "camera_lower", SFVR_SETTING_FLOAT, 0.0, 0.0, 1.0, NULL },
-	{ "camera_closer", SFVR_SETTING_FLOAT, 0.0, 0.0, 0.8, NULL },
+	// Signed third-person head origin adjustment; the native game camera remains the source.
+	{ "camera_lower", SFVR_SETTING_FLOAT, 0.0, -1.0, 1.0, NULL },
+	{ "camera_closer", SFVR_SETTING_FLOAT, 0.0, -1.0, 0.8, NULL },
+	{ "defaults_profile", SFVR_SETTING_ENUM, 0.0, 0.0, 1.0, defaults_profile_values },
+	{ "settings_page_side", SFVR_SETTING_ENUM, 2.0, 0.0, 2.0, settings_page_side_values },
 	// Schema of this port's keys (migrations in dk64vr_settings_parse): 2 moved world_scale 25 -> 15, resolution_scale 1.25 -> 1.0
 	// refresh_rate 120 -> 72 and hud_distance 2 -> 1.5 (files still holding the old defaults are migrated once).
 	// 3 turned snap_blink 0.15 -> 0. 4 moved resolution_scale 1.0 -> 1.25 (2160 an eye) after the
@@ -134,9 +139,8 @@ static const sfvr_setting_key port_keys[] = {
 static const struct { const char *name; double def; } port_defaults[] = {
 	{ "refresh_rate", 72.0 },
 	{ "resolution_scale", DK64VR_RESOLUTION_AUTO },
-	// Right-stick snap turns of 45 degrees (the user, 2026-10-06: 30 felt like the N64's small
-	// camera steps); turn_mode smooth orbits the camera about Donkey Kong instead.
-	{ "snap_angle", 45.0 },
+	// Fresh settings use the shared 30-degree snap default. Schema 5 still moves old 30-degree
+	// defaults to 45 once; turn_mode smooth orbits the camera about Donkey Kong instead.
 	{ "hud_distance", 1.5 },
 };
 #define PORT_DEFAULT_COUNT (sizeof(port_defaults) / sizeof(port_defaults[0]))
@@ -178,6 +182,17 @@ double dk64vr_settings_default(size_t index) {
 		}
 	}
 	return k->def;
+}
+
+double dk64vr_settings_default_for_profile(const dk64vr_settings_t *s, const char *name) {
+	const int index = dk64vr_settings_index(name);
+	if (index < 0) return 0.0;
+	const double frame_personal = dk64vr_settings_get(s, "defaults_profile");
+	if (frame_personal == 1.0) {
+		if (strcmp(name, "turn_mode") == 0) return 1.0;
+		if (strcmp(name, "smooth_turn_speed") == 0) return 120.0;
+	}
+	return dk64vr_settings_default((size_t)index);
 }
 
 void dk64vr_settings_defaults(dk64vr_settings_t *s) {
