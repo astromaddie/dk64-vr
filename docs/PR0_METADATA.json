@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "milestone": "PR0",
+  "status": "EXPERIMENTAL",
+  "publication_status": "private preparation; no release published",
+  "tested_commit": "15660bfc2b057975c38363dfe42f1e8df5a5ec7f",
+  "supported_targets": [
+    "Steam Frame native Linux ARM64 / SteamVR OpenXR / Vulkan"
+  ],
+  "validation": {
+    "host_result": "ROM-free production-source CMake/CTest passed 1/1 in an isolated empty-HOME checkout",
+    "public_ci": {
+      "repository": "astromaddie/dk64-vr",
+      "commit": "15660bfc2b057975c38363dfe42f1e8df5a5ec7f",
+      "run_id": 38100544149,
+      "run_url": "https://github.com/astromaddie/dk64-vr/actions/runs/38100544149",
+      "job_url": "https://github.com/astromaddie/dk64-vr/actions/runs/38100544149/job/114355404418",
+      "event": "push",
+      "status": "completed",
+      "conclusion": "success",
+      "jobs": [
+        {
+          "name": "ROM-free VR host tests",
+          "job_id": 114355404418,
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            "Set up job",
+            "Checkout source without inherited submodules",
+            "Install test tools",
+            "Initialize only public test dependencies",
+            "Compile production VR sources and tests"
+          ]
+        }
+      ]
+    },
+    "full_application_build": "not run; external owned ROM required"
+  },
+  "dependencies": {
+    "rt64_public_commit": "43373749dac9bbc1b653e6a02aed40a9e1783bed",
+    "rt64_overlay_sha256": "b12913902ff8578b7b288ec306996f633510e2bd4554bd9b2a9a198564325bcb",
+    "plume_public_commit": "d890ac899e505fb30040e037a4037cdeca68f033",
+    "plume_overlay_sha256": "99fbdb9731416e35cbc5854bf977cf8fc3679655246462f6e6fed145d18294db",
+    "root_gitlinks": "All 19 direct root gitlinks across the three ports fetched anonymously by exact SHA; this is not a complete application build",
+    "anonymous_recursive_checkout": {
+      "source_commit": "15660bfc2b057975c38363dfe42f1e8df5a5ec7f",
+      "result": "PASS",
+      "direct_gitlinks": 5,
+      "recursive_submodules": 38,
+      "abnormal_submodule_statuses": 0,
+      "isolation": "Fresh empty HOME, system/global Git config disabled, no credentials or personal Git configuration",
+      "scope": "Dependency availability only; no full game build or ROM access"
+    }
+  },
+  "focused_headset_acceptance": "pending for current source candidate",
+  "sustained_worn_performance": "unmeasured on current candidate",
+  "license_scope": "Upstream host application GPLv3 notices in COPYING are retained. RT64/Plume keep their own MIT notices. These licenses do not grant redistribution rights to commercial ROMs, extracted media, saves or proprietary libraries.",
+  "distribution_blockers": [
+    "Game screenshots, logos and optional media still require provenance review",
+    "Full clean application build and focused headset acceptance remain open"
+  ],
+  "changelog": "CHANGELOG.md"
+}
