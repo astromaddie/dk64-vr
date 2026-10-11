@@ -4,6 +4,8 @@ This is my Steam Frame fork of [Donkey Kong 64: Recompiled](https://github.com/R
 
 **EXPERIMENTAL.** This is a personal-use project and is still a work in progress. You need the supported US 1.0 DK64 ROM from your own copy of the game. The repository contains source and build tools, not the ROM or generated game data.
 
+**Want to play on Steam Frame?** Download the prebuilt standalone package from the [v0.1.0 prerelease](https://github.com/astromaddie/dk64-vr/releases/tag/v0.1.0); no compiler is needed. You still need the supported US 1.0 DK64 ROM from your own copy of the game.
+
 ## What the Frame fork adds
 
 - Tracked stereo gameplay, with game menus, pause screens and HUD presented on readable panels.
