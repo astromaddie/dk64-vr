@@ -2,7 +2,7 @@
   "schema_version": 1,
   "milestone": "PR0",
   "status": "EXPERIMENTAL",
-  "publication_status": "ready for experimental public source technical preview; no binary release",
+  "publication_status": "public experimental source technical preview; no binary release",
   "tested_commit": "17795fe5301a403553b01cb21e2344ce50be020b",
   "supported_targets": [
     "Steam Frame native Linux ARM64 / SteamVR OpenXR / Vulkan"
@@ -11,17 +11,17 @@
     "host_result": "ROM-free production-source CMake/CTest passed 1/1 on current source in an isolated empty-HOME checkout",
     "public_ci": {
       "repository": "astromaddie/dk64-vr",
-      "commit": "17795fe5301a403553b01cb21e2344ce50be020b",
-      "run_id": 38111113627,
-      "run_url": "https://github.com/astromaddie/dk64-vr/actions/runs/38111113627",
-      "job_url": "https://github.com/astromaddie/dk64-vr/actions/runs/38111113627/job/114386697943",
-      "event": "push",
+      "commit": "0635cc28d0c6f4e78f5961a55537c32393f91676",
+      "run_id": 38122901342,
+      "run_url": "https://github.com/astromaddie/dk64-vr/actions/runs/38122901342",
+      "job_id": 114421280632,
+      "job_url": "https://github.com/astromaddie/dk64-vr/actions/runs/38122901342/job/114421280632",
       "status": "completed",
-      "conclusion": "failure",
-      "job_id": 114386697943,
-      "job_name": "ROM-free VR host tests",
-      "steps_run": 0,
-      "job_not_started_reason": "The job was not started because recent account payments have failed or the spending limit needs to be increased; no workflow steps ran."
+      "conclusion": "success",
+      "steps_run": 7,
+      "attempt": 2,
+      "game_data": "none",
+      "repository_secrets": "none"
     },
     "full_application_build": "not run: no supported DK64 ROM was present in the scoped project/build inventory",
     "historical_passing_public_ci": {
@@ -48,6 +48,20 @@
           ]
         }
       ]
+    },
+    "historical_billing_blocked_ci": {
+      "repository": "astromaddie/dk64-vr",
+      "commit": "17795fe5301a403553b01cb21e2344ce50be020b",
+      "run_id": 38111113627,
+      "run_url": "https://github.com/astromaddie/dk64-vr/actions/runs/38111113627",
+      "job_url": "https://github.com/astromaddie/dk64-vr/actions/runs/38111113627/job/114386697943",
+      "event": "push",
+      "status": "completed",
+      "conclusion": "failure",
+      "job_id": 114386697943,
+      "job_name": "ROM-free VR host tests",
+      "steps_run": 0,
+      "job_not_started_reason": "The job was not started because recent account payments have failed or the spending limit needs to be increased; no workflow steps ran."
     }
   },
   "dependencies": {

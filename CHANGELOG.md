@@ -11,3 +11,7 @@
 - Updated the tested source to `17795fe5301a403553b01cb21e2344ce50be020b`; ROM-free production-source CMake/CTest passed 1/1 locally with public pinned dependencies.
 - The latest exact-source GitHub job did not start because of the account billing/spending-limit block; the earlier successful run is retained in PR0_METADATA.json.
 - No full ARM64 application build was run because the scoped project/build inventory contained no supported game ROM.
+
+## 2026-10-11 — Public experimental source
+
+- Made the repository public and confirmed the ROM-free GitHub validation passes without private secrets or game data.
