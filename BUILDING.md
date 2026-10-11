@@ -1,5 +1,8 @@
 # Building Guide
 
+This is the upstream desktop recompiler workflow. For the standalone Linux ARM64 Steam Frame
+package, use [Steam Frame build and install](docs/STEAM-FRAME-BUILD-INSTALL.md) instead.
+
 This guide will help you build the project on your local machine. The process will require you to provide a decompressed ROM of the US version of the game.
 
 These steps cover: decompressing the ROM, running the recompiler and finally building the project.

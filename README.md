@@ -14,29 +14,9 @@ This is my Steam Frame fork of [Donkey Kong 64: Recompiled](https://github.com/R
 
 See [VR architecture](docs/VR_ARCHITECTURE.md) for the renderer and game integration, controls, settings and detailed implementation notes.
 
-## Build
+## Build and install
 
-Use Docker on ARM64 Linux or an ARM64 Docker environment on Apple Silicon. The build script creates its pinned compiler image and packages the game.
-
-Build the Steam Frame version with your own supported ROM:
-
-```sh
-git clone --recurse-submodules --branch steam-frame https://github.com/astromaddie/dk64-vr.git
-cd dk64-vr
-export DK64_ROM="/path/to/owned-us-rom.z64"
-DK64_VR=1 JOBS=4 tools/docker/build-linux.sh all
-```
-
-See [BUILDING.md](BUILDING.md) for prerequisites and the standard recompiler steps. The ROM and generated game data stay outside Git and CI artifacts.
-
-To copy the package to your Frame, register it in the Steam library, and copy your own ROM, set the Frame's SSH address and run:
-
-```sh
-FRAME_HOST="steamos@YOUR_FRAME_ADDRESS" tools/steam_frame/deploy.sh \
-  --package build-linux-aarch64-vr/package/DK64Recompiled --rom "$DK64_ROM"
-```
-
-Launch DK64VR from the Frame's Steam library so it receives controller input.
+The [Steam Frame build and install guide](docs/STEAM-FRAME-BUILD-INSTALL.md) covers Docker ARM64 builds from Linux, macOS, or Windows through WSL2, the supported ROM, package output, first installation and Steam launch. It distinguishes the Linux ARM64 Frame package from Windows or desktop builds. The upstream [BUILDING.md](BUILDING.md) is a desktop recompiler guide, not the Steam Frame packaging route.
 
 ## ROM-free VR checks
 

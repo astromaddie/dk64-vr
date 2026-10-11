@@ -3,8 +3,8 @@
 # upstream's CI uses, and it also builds the MIPS patches with ld.lld-15), libstdc++ 12
 # (GLIBCXX 3.4.30), CMake 3.31.6, SDL2 2.30.11 built from source with x11, and static builds
 # of freetype and libcurl so the package does not depend on what the host ships. The image
-# builds for the Docker host's architecture, so on an Apple Silicon Mac (Colima) it is
-# arm64, the Steam Frame's.
+# builds for the BuildKit target platform. On x86-64 hosts, use buildx with
+# --platform linux/arm64 and emulation to produce the Steam Frame package.
 #
 #   docker build -t dk64-vr-linux -f tools/docker/linux.Dockerfile tools/docker
 #   tools/docker/build-linux.sh
