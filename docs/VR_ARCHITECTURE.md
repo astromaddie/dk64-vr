@@ -1,11 +1,10 @@
 # DK64 VR (Steam Frame) architecture
 
-Current state of the VR layer in this fork of Donkey Kong 64: Recompiled (N64Recomp + RT64 +
-N64ModernRuntime). All VR code is behind the CMake option `DK64_VR`; with it off the flat build is
-unchanged. Chronology, if any is needed, goes in a separate lab log, not here.
-
-Worn twice by the user on 2026-10-06 (builds before this one). Everything changed since is
-headset-unverified, and the status table says so row by row.
+This fork adds native OpenXR stereo rendering to Donkey Kong 64: Recompiled. Enable it with
+`DK64_VR`; the original flat mode remains available. The port includes tracked gameplay, a 3D
+cutscene cinema, VR menus and settings, comfort turning, camera and world-size adjustments, and
+Frame controller bindings. The sections below describe how those parts connect to the game,
+RT64, Plume and SteamVR.
 
 ## 1. Target and probe facts
 
