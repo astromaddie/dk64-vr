@@ -1,0 +1,4 @@
+# Preserve upstream patch bytes and their context lines.
+third_party/vr-dependencies/*.patch -text -eol whitespace=-blank-at-eol
+# Archive the original landing page verbatim, including Markdown line breaks.
+docs/README_PRE_PR0.md -text -eol whitespace=-blank-at-eol

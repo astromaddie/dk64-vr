@@ -1,0 +1,41 @@
+name: public-vr-validation
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-vr-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vr-host-tests:
+    name: ROM-free VR host tests
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source without inherited submodules
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: false
+
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Initialize only public test dependencies
+        env:
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          git submodule update --init --depth=1 -- lib/rt64
+          bash tools/vr/prepare-public-dependencies.sh
+
+      - name: Compile production VR sources and tests
+        run: |
+          cmake -S src/vr/tests -B build-vrtest -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-vrtest --parallel 2
+          ctest --test-dir build-vrtest --output-on-failure

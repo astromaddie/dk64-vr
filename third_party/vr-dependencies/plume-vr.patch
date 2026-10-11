@@ -1,0 +1,660 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index f1dd503..63cc6d4 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -91,6 +91,41 @@ namespace plume {
+         VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
+     };
+ 
++#if PLUME_VULKAN_CREATE_HOOKS
++    static VulkanCreateHooks createHooks;
++
++    void SetVulkanCreateHooks(const VulkanCreateHooks &hooks) {
++        createHooks = hooks;
++    }
++
++    const VulkanCreateHooks &GetVulkanCreateHooks() {
++        return createHooks;
++    }
++
++    std::mutex *GetVulkanQueueMutex(VulkanDevice *device, uint32_t familyIndex, uint32_t queueIndex) {
++        if ((device == nullptr) || (familyIndex >= device->queueFamilies.size()) || (queueIndex >= device->queueFamilies[familyIndex].queues.size())) {
++            return nullptr;
++        }
++
++        return device->queueFamilies[familyIndex].queues[queueIndex].mutex.get();
++    }
++
++    VulkanPassStats &GetVulkanPassStats() {
++        static thread_local VulkanPassStats stats;
++        return stats;
++    }
++
++    static VulkanPassOptions passOptions;
++
++    void SetVulkanPassOptions(const VulkanPassOptions &options) {
++        passOptions = options;
++    }
++
++    const VulkanPassOptions &GetVulkanPassOptions() {
++        return passOptions;
++    }
++#endif
++
+     // Common functions.
+ 
+     static uint32_t roundUp(uint32_t value, uint32_t powerOf2Alignment) {
+@@ -1612,6 +1647,11 @@ namespace plume {
+         dynamicStates.clear();
+         dynamicStates.emplace_back(VK_DYNAMIC_STATE_VIEWPORT);
+         dynamicStates.emplace_back(VK_DYNAMIC_STATE_SCISSOR);
++#if PLUME_VULKAN_CREATE_HOOKS
++        if (device->cmdSetFragmentShadingRate != nullptr) {
++            dynamicStates.emplace_back(VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR);
++        }
++#endif
+ 
+         if (desc.dynamicDepthBiasEnabled) {
+             dynamicStates.emplace_back(VK_DYNAMIC_STATE_DEPTH_BIAS);
+@@ -2511,12 +2551,88 @@ namespace plume {
+     }
+ 
+     // VulkanFramebuffer
++
++#if PLUME_VULKAN_CREATE_HOOKS
++    // Convert only the optional rate-attachment pass. Keep the ordinary framebuffer's
++    // descriptions (including load/store operations) as the source of truth.
++    static VkResult createShadingRateRenderPass(VulkanDevice *device, const VkRenderPassCreateInfo &base,
++        const VulkanShadingRateAttachment &rate, VkRenderPass *renderPass) {
++        const VkSubpassDescription &sub = base.pSubpasses[0];
++        assert(base.subpassCount == 1 && sub.inputAttachmentCount == 0 && sub.pResolveAttachments == nullptr);
++        std::vector<VkAttachmentDescription2> attachments;
++        for (uint32_t i = 0; i < base.attachmentCount; i++) {
++            const VkAttachmentDescription &a = base.pAttachments[i];
++            VkAttachmentDescription2 a2 = { VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2 };
++            a2.flags = a.flags;
++            a2.format = a.format;
++            a2.samples = a.samples;
++            a2.loadOp = a.loadOp;
++            a2.storeOp = a.storeOp;
++            a2.stencilLoadOp = a.stencilLoadOp;
++            a2.stencilStoreOp = a.stencilStoreOp;
++            a2.initialLayout = a.initialLayout;
++            a2.finalLayout = a.finalLayout;
++            attachments.push_back(a2);
++        }
++        VkAttachmentDescription2 a = { VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2 };
++        a.format = VK_FORMAT_R8_UINT;
++        a.samples = VK_SAMPLE_COUNT_1_BIT;
++        a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++        a.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++        a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++        a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++        a.initialLayout = a.finalLayout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
++        attachments.push_back(a);
++
++        VkAttachmentReference2 rateRef = { VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2 };
++        rateRef.attachment = base.attachmentCount;
++        rateRef.layout = a.initialLayout;
++        VkFragmentShadingRateAttachmentInfoKHR rateInfo = { VK_STRUCTURE_TYPE_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR };
++        rateInfo.pFragmentShadingRateAttachment = &rateRef;
++        rateInfo.shadingRateAttachmentTexelSize = rate.texelSize;
++        std::vector<VkAttachmentReference2> colors;
++        for (uint32_t i = 0; i < sub.colorAttachmentCount; i++) {
++            VkAttachmentReference2 r = { VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2 };
++            r.attachment = sub.pColorAttachments[i].attachment;
++            r.layout = sub.pColorAttachments[i].layout;
++            colors.push_back(r);
++        }
++        VkAttachmentReference2 depth = { VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2 };
++        if (sub.pDepthStencilAttachment) {
++            depth.attachment = sub.pDepthStencilAttachment->attachment;
++            depth.layout = sub.pDepthStencilAttachment->layout;
++        }
++        VkSubpassDescription2 sub2 = { VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2 };
++        sub2.pNext = &rateInfo;
++        sub2.flags = sub.flags;
++        sub2.pipelineBindPoint = sub.pipelineBindPoint;
++        sub2.colorAttachmentCount = uint32_t(colors.size());
++        sub2.pColorAttachments = colors.data();
++        sub2.pDepthStencilAttachment = sub.pDepthStencilAttachment ? &depth : nullptr;
++        VkRenderPassCreateInfo2 pass = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2 };
++        pass.flags = base.flags;
++        pass.attachmentCount = uint32_t(attachments.size());
++        pass.pAttachments = attachments.data();
++        pass.subpassCount = 1;
++        pass.pSubpasses = &sub2;
++        return vkCreateRenderPass2(device->vk, &pass, nullptr, renderPass);
++    }
++
++    VulkanFramebuffer::VulkanFramebuffer(VulkanDevice *device, const RenderFramebufferDesc &desc, const VulkanShadingRateAttachment *rate) {
++#else
+     
+     VulkanFramebuffer::VulkanFramebuffer(VulkanDevice *device, const RenderFramebufferDesc &desc) {
++#endif
+         assert(device != nullptr);
+ 
+         this->device = device;
+         depthAttachmentReadOnly = desc.depthAttachmentReadOnly;
++#if PLUME_VULKAN_CREATE_HOOKS
++        savedDepthView = desc.depthAttachmentView;
++        if (desc.colorAttachmentViews) {
++            savedColorViews.assign(desc.colorAttachmentViews, desc.colorAttachmentViews + desc.colorAttachmentsCount);
++        }
++#endif
+ 
+         VkResult res;
+         std::vector<VkAttachmentDescription> attachments;
+@@ -2602,6 +2718,11 @@ namespace plume {
+             attachment.samples = VkSampleCountFlagBits(depthAttachment->desc.multisampling.sampleCount);
+             attachment.loadOp = preferNoneForReadOnly ? VK_ATTACHMENT_LOAD_OP_NONE_EXT : VK_ATTACHMENT_LOAD_OP_LOAD;
+             attachment.storeOp = preferNoneForReadOnly ? VK_ATTACHMENT_STORE_OP_NONE_EXT : VK_ATTACHMENT_STORE_OP_STORE;
++#       if PLUME_VULKAN_CREATE_HOOKS
++            if (preferNoneForReadOnly && passOptions.loadReadOnlyDepth) {
++                attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++            }
++#       endif
+             attachment.stencilLoadOp = attachment.loadOp;
+             attachment.stencilStoreOp = attachment.storeOp;
+             attachment.initialLayout = depthReference.layout;
+@@ -2625,11 +2746,27 @@ namespace plume {
+         passInfo.pSubpasses = &subpass;
+         passInfo.subpassCount = 1;
+ 
++#if PLUME_VULKAN_CREATE_HOOKS
++        if (rate != nullptr) {
++            shadingRateView = rate->imageView;
++            shadingRateTexelSize = rate->texelSize;
++            shadingRateLifetime = rate->lifetime;
++            imageViews.push_back(rate->imageView);
++        }
++        res = createCompatibleRenderPass(passInfo, &renderPass);
++#else
+         res = vkCreateRenderPass(device->vk, &passInfo, nullptr, &renderPass);
++#endif
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vkCreateRenderPass failed with error code 0x%X.\n", res);
+             return;
+         }
++
++#   if PLUME_VULKAN_CREATE_HOOKS
++        this->attachmentDescs = attachments;
++        this->colorReferences = colorReferences;
++        this->depthReference = depthReference;
++#   endif
+         
+         VkFramebufferCreateInfo fbInfo = {};
+         fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+@@ -2652,11 +2789,95 @@ namespace plume {
+             vkDestroyFramebuffer(device->vk, vk, nullptr);
+         }
+ 
++#   if PLUME_VULKAN_CREATE_HOOKS
++        for (const auto &pass : clearPasses) {
++            vkDestroyRenderPass(device->vk, pass.second, nullptr);
++        }
++#   endif
++
+         if (renderPass != VK_NULL_HANDLE) {
+             vkDestroyRenderPass(device->vk, renderPass, nullptr);
+         }
+     }
+ 
++#if PLUME_VULKAN_CREATE_HOOKS
++    VkResult VulkanFramebuffer::createCompatibleRenderPass(const VkRenderPassCreateInfo &info, VkRenderPass *pass) const {
++        // All variants must carry the same rate attachment and subpass pNext. Stored
++        // attachmentDescs contain only colour/depth; this helper appends the read-only map.
++        if (shadingRateView != VK_NULL_HANDLE) {
++            VulkanShadingRateAttachment rate;
++            rate.imageView = shadingRateView;
++            rate.texelSize = shadingRateTexelSize;
++            return createShadingRateRenderPass(device, info, rate, pass);
++        }
++
++        return vkCreateRenderPass(device->vk, &info, nullptr, pass);
++    }
++
++    VkRenderPass VulkanFramebuffer::getClearRenderPass(uint32_t clearMask) const {
++        std::scoped_lock lock(clearPassMutex);
++        for (const auto &pass : clearPasses) {
++            if (pass.first == clearMask) {
++                return pass.second;
++            }
++        }
++
++        // The same attachments, formats, layouts and subpass: compatible with the framebuffer.
++        std::vector<VkAttachmentDescription> attachments = attachmentDescs;
++        for (uint32_t i = 0; i < colorReferences.size(); i++) {
++            if (clearMask & (1U << i)) {
++                attachments[colorReferences[i].attachment].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
++            }
++        }
++
++        const bool hasDepth = (depthAttachment != nullptr);
++        if (hasDepth && (clearMask & 0x100)) {
++            attachments[depthReference.attachment].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
++            attachments[depthReference.attachment].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
++        }
++
++        VkSubpassDescription subpass = {};
++        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
++        subpass.pColorAttachments = !colorReferences.empty() ? colorReferences.data() : nullptr;
++        subpass.colorAttachmentCount = uint32_t(colorReferences.size());
++        subpass.pDepthStencilAttachment = hasDepth ? &depthReference : nullptr;
++
++        VkRenderPassCreateInfo passInfo = {};
++        passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
++        passInfo.pAttachments = attachments.data();
++        passInfo.attachmentCount = uint32_t(attachments.size());
++        passInfo.pSubpasses = &subpass;
++        passInfo.subpassCount = 1;
++
++        VkRenderPass pass = VK_NULL_HANDLE;
++        VkResult res = createCompatibleRenderPass(passInfo, &pass);
++        if (res != VK_SUCCESS) {
++            fprintf(stderr, "vkCreateRenderPass (clear variant) failed with error code 0x%X.\n", res);
++            return VK_NULL_HANDLE;
++        }
++
++        clearPasses.emplace_back(clearMask, pass);
++        return pass;
++    }
++
++    VulkanFramebuffer *VulkanFramebuffer::withShadingRate(const VulkanShadingRateAttachment &rate) {
++        if (!shadingRateFramebuffer || shadingRateFramebuffer->shadingRateView != rate.imageView
++            || shadingRateFramebuffer->shadingRateTexelSize.width != rate.texelSize.width
++            || shadingRateFramebuffer->shadingRateTexelSize.height != rate.texelSize.height) {
++            std::vector<const RenderTexture *> colors(colorAttachments.begin(), colorAttachments.end());
++            RenderFramebufferDesc desc;
++            desc.colorAttachments = colors.data();
++            desc.colorAttachmentsCount = uint32_t(colors.size());
++            desc.colorAttachmentViews = savedColorViews.empty() ? nullptr : savedColorViews.data();
++            desc.depthAttachment = depthAttachment;
++            desc.depthAttachmentView = savedDepthView;
++            desc.depthAttachmentReadOnly = depthAttachmentReadOnly;
++            shadingRateFramebuffer = std::make_unique<VulkanFramebuffer>(device, desc, &rate);
++        }
++        return shadingRateFramebuffer->vk != VK_NULL_HANDLE ? shadingRateFramebuffer.get() : nullptr;
++    }
++#endif
++
+     uint32_t VulkanFramebuffer::getWidth() const {
+         return width;
+     }
+@@ -2794,6 +3015,9 @@ namespace plume {
+ 
+     void VulkanCommandList::begin() {
+         vkResetCommandBuffer(vk, 0);
++#   if PLUME_VULKAN_CREATE_HOOKS
++        pendingClearMask = 0;
++#   endif
+ 
+         VkCommandBufferBeginInfo beginInfo = {};
+         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+@@ -3098,6 +3322,9 @@ namespace plume {
+ 
+     void VulkanCommandList::setFramebuffer(const RenderFramebuffer *framebuffer) {
+         endActiveRenderPass();
++#if PLUME_VULKAN_CREATE_HOOKS
++        useShadingRateAttachment = true;
++#endif
+ 
+         if (framebuffer != nullptr) {
+             const VulkanFramebuffer *interfaceFramebuffer = static_cast<const VulkanFramebuffer *>(framebuffer);
+@@ -3144,6 +3371,18 @@ namespace plume {
+         assert(attachmentIndex < targetFramebuffer->colorAttachments.size());
+         assert((clearRectsCount == 0) || (clearRects != nullptr));
+ 
++#   if PLUME_VULKAN_CREATE_HOOKS
++        if (passOptions.deferFullClears && (activeRenderPass == VK_NULL_HANDLE) && (attachmentIndex < 8) && fullFramebufferRects(clearRects, clearRectsCount)) {
++            pendingClearMask |= (1U << attachmentIndex);
++            auto &pending = pendingClearValues[attachmentIndex].color.float32;
++            pending[0] = colorValue.r;
++            pending[1] = colorValue.g;
++            pending[2] = colorValue.b;
++            pending[3] = colorValue.a;
++            return;
++        }
++#   endif
++
+         checkActiveRenderPass();
+ 
+         thread_local std::vector<VkClearRect> rectVector;
+@@ -3164,6 +3403,19 @@ namespace plume {
+         assert(targetFramebuffer != nullptr);
+         assert((clearRectsCount == 0) || (clearRects != nullptr));
+ 
++#   if PLUME_VULKAN_CREATE_HOOKS
++        const VkFormat depthFormat = (targetFramebuffer->depthAttachment != nullptr) ? toVk(targetFramebuffer->depthAttachment->desc.format) : VK_FORMAT_UNDEFINED;
++        const bool depthOnlyFormat = (depthFormat == VK_FORMAT_D32_SFLOAT) || (depthFormat == VK_FORMAT_D16_UNORM);
++        if (passOptions.deferFullClears && (activeRenderPass == VK_NULL_HANDLE) && clearDepth && !clearStencil && depthOnlyFormat &&
++            !targetFramebuffer->depthAttachmentReadOnly && fullFramebufferRects(clearRects, clearRectsCount))
++        {
++            pendingClearMask |= 0x100;
++            pendingClearValues[8].depthStencil.depth = depthValue;
++            pendingClearValues[8].depthStencil.stencil = 0;
++            return;
++        }
++#   endif
++
+         checkActiveRenderPass();
+ 
+         thread_local std::vector<VkClearRect> rectVector;
+@@ -3466,28 +3718,106 @@ namespace plume {
+         vkCmdWriteTimestamp(vk, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, interfaceQueryPool->vk, queryIndex);
+     }
+ 
++#if PLUME_VULKAN_CREATE_HOOKS
++    bool VulkanCommandList::fullFramebufferRects(const RenderRect *clearRects, uint32_t clearRectsCount) const {
++        if (targetFramebuffer == nullptr) {
++            return false;
++        }
++
++        if (clearRectsCount == 0) {
++            return true;
++        }
++
++        return (clearRectsCount == 1) && (clearRects[0].left <= 0) && (clearRects[0].top <= 0) &&
++            (clearRects[0].right >= int32_t(targetFramebuffer->width)) && (clearRects[0].bottom >= int32_t(targetFramebuffer->height));
++    }
++#endif
++
+     void VulkanCommandList::checkActiveRenderPass() {
+         assert(targetFramebuffer != nullptr);
+         
+         if (activeRenderPass == VK_NULL_HANDLE) {
++#if PLUME_VULKAN_CREATE_HOOKS
++            VulkanDevice *device = queue->device;
++            if (device->cmdSetFragmentShadingRate != nullptr) {
++                const bool foveated = targetFramebuffer->shadingRateView != VK_NULL_HANDLE;
++                const VkExtent2D fragmentSize = { 1, 1 };
++                const VkFragmentShadingRateCombinerOpKHR combiners[2] = {
++                    VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
++                    foveated && useShadingRateAttachment ? VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR : VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR
++                };
++                device->cmdSetFragmentShadingRate(vk, &fragmentSize, combiners);
++                if (foveated) device->shadingRatePasses.fetch_add(1, std::memory_order_relaxed);
++            }
++#endif
+             VkRenderPassBeginInfo beginInfo = {};
+             beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+             beginInfo.renderPass = targetFramebuffer->renderPass;
+             beginInfo.framebuffer = targetFramebuffer->vk;
+             beginInfo.renderArea.extent.width = targetFramebuffer->width;
+             beginInfo.renderArea.extent.height = targetFramebuffer->height;
++#       if PLUME_VULKAN_CREATE_HOOKS
++            VkClearValue clearValues[9] = {};
++            if (pendingClearMask != 0) {
++                VkRenderPass clearPass = targetFramebuffer->getClearRenderPass(pendingClearMask);
++                if (clearPass != VK_NULL_HANDLE) {
++                    const uint32_t colorCount = uint32_t(targetFramebuffer->colorReferences.size());
++                    for (uint32_t i = 0; i < colorCount; i++) {
++                        clearValues[targetFramebuffer->colorReferences[i].attachment] = pendingClearValues[i];
++                    }
++
++                    if (targetFramebuffer->depthAttachment != nullptr) {
++                        clearValues[targetFramebuffer->depthReference.attachment] = pendingClearValues[8];
++                    }
++
++                    beginInfo.renderPass = clearPass;
++                    beginInfo.clearValueCount = uint32_t(targetFramebuffer->attachmentDescs.size());
++                    beginInfo.pClearValues = clearValues;
++                }
++
++                pendingClearMask = 0;
++            }
++#       endif
+             vkCmdBeginRenderPass(vk, &beginInfo, VkSubpassContents::VK_SUBPASS_CONTENTS_INLINE);
+-            activeRenderPass = targetFramebuffer->renderPass;
++            activeRenderPass = beginInfo.renderPass;
++#       if PLUME_VULKAN_CREATE_HOOKS
++            VulkanPassStats &stats = GetVulkanPassStats();
++            stats.begins++;
++            stats.pixels += uint64_t(targetFramebuffer->width) * targetFramebuffer->height;
++#       endif
+         }
+     }
+ 
+     void VulkanCommandList::endActiveRenderPass() {
++#   if PLUME_VULKAN_CREATE_HOOKS
++        // Clears still waiting for their pass: an otherwise empty pass that only clears.
++        if ((pendingClearMask != 0) && (activeRenderPass == VK_NULL_HANDLE) && (targetFramebuffer != nullptr)) {
++            checkActiveRenderPass();
++        }
++
++        pendingClearMask = 0;
++#   endif
+         if (activeRenderPass != VK_NULL_HANDLE) {
+             vkCmdEndRenderPass(vk);
+             activeRenderPass = VK_NULL_HANDLE;
+         }
+     }
+ 
++#if PLUME_VULKAN_CREATE_HOOKS
++    void VulkanCommandList::setShadingRateEnabled(bool enabled) {
++        useShadingRateAttachment = enabled;
++        VulkanDevice *device = queue->device;
++        if (activeRenderPass != VK_NULL_HANDLE && device->cmdSetFragmentShadingRate) {
++            const VkExtent2D size = { 1, 1 };
++            const VkFragmentShadingRateCombinerOpKHR combiners[2] = {
++                VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
++                enabled && targetFramebuffer->shadingRateView ? VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR : VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR
++            };
++            device->cmdSetFragmentShadingRate(vk, &size, combiners);
++        }
++    }
++#endif
++
+     void VulkanCommandList::setDescriptorSet(VkPipelineBindPoint bindPoint, const VulkanPipelineLayout *pipelineLayout, const RenderDescriptorSet *descriptorSet, uint32_t setIndex) {
+         assert(pipelineLayout != nullptr);
+         assert(descriptorSet != nullptr);
+@@ -3758,7 +4088,18 @@ namespace plume {
+             1   // VK_PHYSICAL_DEVICE_TYPE_CPU
+         };
+ 
++#   if PLUME_VULKAN_CREATE_HOOKS
++        const VkPhysicalDevice hookedPhysicalDevice = (createHooks.pickPhysicalDevice != nullptr) ? createHooks.pickPhysicalDevice(createHooks.user, renderInterface->instance) : VK_NULL_HANDLE;
++#   endif
++
+         for (uint32_t i = 0; i < deviceCount; i++) {
++#       if PLUME_VULKAN_CREATE_HOOKS
++            // The host's device is the only candidate when it picked one.
++            if ((hookedPhysicalDevice != VK_NULL_HANDLE) && (physicalDevices[i] != hookedPhysicalDevice)) {
++                continue;
++            }
++#       endif
++
+             VkPhysicalDeviceProperties deviceProperties;
+             vkGetPhysicalDeviceProperties(physicalDevices[i], &deviceProperties);
+ 
+@@ -4049,7 +4390,11 @@ namespace plume {
+         createInfo.enabledExtensionCount = uint32_t(enabledExtensions.size());
+         createInfo.pEnabledFeatures = &deviceFeatures.features;
+ 
++#   if PLUME_VULKAN_CREATE_HOOKS
++        VkResult res = (createHooks.createDevice != nullptr) ? createHooks.createDevice(createHooks.user, physicalDevice, &createInfo, &vk) : vkCreateDevice(physicalDevice, &createInfo, nullptr, &vk);
++#   else
+         VkResult res = vkCreateDevice(physicalDevice, &createInfo, nullptr, &vk);
++#   endif
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vkCreateDevice failed with error code 0x%X.\n", res);
+             return;
+@@ -4058,6 +4403,12 @@ namespace plume {
+         for (uint32_t i = 0; i < queueFamilyCount; i++) {
+             for (uint32_t j = 0; j < queueFamilies[i].queues.size(); j++) {
+                 vkGetDeviceQueue(vk, i, j, &queueFamilies[i].queues[j].vk);
++#           if PLUME_VULKAN_CREATE_HOOKS
++                // Created up front so a host can hold a queue's mutex before plume uses it.
++                if (createHooks.deviceCreated != nullptr) {
++                    queueFamilies[i].queues[j].mutex = std::make_unique<std::mutex>();
++                }
++#           endif
+             }
+         }
+ 
+@@ -4154,6 +4505,12 @@ namespace plume {
+         if (!nullDescriptorSupported) {
+             nullBuffer = createBuffer(RenderBufferDesc::DefaultBuffer(16, RenderBufferFlag::VERTEX));
+         }
++
++#   if PLUME_VULKAN_CREATE_HOOKS
++        if (createHooks.deviceCreated != nullptr) {
++            createHooks.deviceCreated(createHooks.user, this);
++        }
++#   endif
+     }
+ 
+     VulkanDevice::~VulkanDevice() {
+@@ -4573,7 +4930,11 @@ namespace plume {
+         }
+ #   endif
+         
++#   if PLUME_VULKAN_CREATE_HOOKS
++        res = (createHooks.createInstance != nullptr) ? createHooks.createInstance(createHooks.user, &createInfo, &instance) : vkCreateInstance(&createInfo, nullptr, &instance);
++#   else
+         res = vkCreateInstance(&createInfo, nullptr, &instance);
++#   endif
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vkCreateInstance failed with error code 0x%X.\n", res);
+             return;
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index 0a1edbe..3169cfd 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -10,6 +10,7 @@
+ #include "plume_render_interface.h"
+ 
+ #include <mutex>
++#include <atomic>
+ #include <set>
+ #include <unordered_map>
+ #include <unordered_set>
+@@ -263,6 +264,15 @@ namespace plume {
+         void releaseImageViews();
+     };
+ 
++#if PLUME_VULKAN_CREATE_HOOKS
++    // Optional app-owned KHR shading-rate image; ordinary colour/depth images stay sampleable.
++    struct VulkanShadingRateAttachment {
++        VkImageView imageView = VK_NULL_HANDLE;
++        VkExtent2D texelSize = { 1, 1 };
++        std::shared_ptr<void> lifetime;
++    };
++#endif
++
+     struct VulkanFramebuffer : RenderFramebuffer {
+         VulkanDevice *device = nullptr;
+         VkFramebuffer vk = VK_NULL_HANDLE;
+@@ -273,8 +283,33 @@ namespace plume {
+         bool depthAttachmentReadOnly = false;
+         uint32_t width = 0;
+         uint32_t height = 0;
++#if PLUME_VULKAN_CREATE_HOOKS
++        // Compatible variants of renderPass whose load ops clear some attachments (bit i: color
++        // attachment i, bit 8: depth), made on first use (VulkanPassOptions::deferFullClears).
++        std::vector<VkAttachmentDescription> attachmentDescs;
++        std::vector<VkAttachmentReference> colorReferences;
++        VkAttachmentReference depthReference = {};
++        mutable std::mutex clearPassMutex;
++        mutable std::vector<std::pair<uint32_t, VkRenderPass>> clearPasses;
++        VkResult createCompatibleRenderPass(const VkRenderPassCreateInfo &info, VkRenderPass *pass) const;
++        VkRenderPass getClearRenderPass(uint32_t clearMask) const;
++#endif
+ 
++#if PLUME_VULKAN_CREATE_HOOKS
++        VkImageView shadingRateView = VK_NULL_HANDLE;
++        VkExtent2D shadingRateTexelSize = {};
++        std::shared_ptr<void> shadingRateLifetime;
++        std::unique_ptr<VulkanFramebuffer> shadingRateFramebuffer;
++        std::vector<const RenderTextureView *> savedColorViews;
++        const RenderTextureView *savedDepthView = nullptr;
++        // Cached companion framebuffer. The app owns the rate image and must keep it alive
++        // until both the companion and every command using it have completed.
++        VulkanFramebuffer *withShadingRate(const VulkanShadingRateAttachment &rate);
++        VulkanFramebuffer(VulkanDevice *device, const RenderFramebufferDesc &desc, const VulkanShadingRateAttachment *rate = nullptr);
++#else
+         VulkanFramebuffer(VulkanDevice *device, const RenderFramebufferDesc &desc);
++#endif
++
+         ~VulkanFramebuffer() override;
+         uint32_t getWidth() const override;
+         uint32_t getHeight() const override;
+@@ -302,6 +337,15 @@ namespace plume {
+         const VulkanPipelineLayout *activeGraphicsPipelineLayout = nullptr;
+         const VulkanPipelineLayout *activeRaytracingPipelineLayout = nullptr;
+         VkRenderPass activeRenderPass = VK_NULL_HANDLE;
++#if PLUME_VULKAN_CREATE_HOOKS
++        // Full-framebuffer clears recorded before the render pass began, turned into its load ops
++        // (VulkanPassOptions::deferFullClears).
++        uint32_t pendingClearMask = 0;
++        VkClearValue pendingClearValues[9] = {};
++        bool fullFramebufferRects(const RenderRect *clearRects, uint32_t clearRectsCount) const;
++        bool useShadingRateAttachment = true;
++        void setShadingRateEnabled(bool enabled);
++#endif
+ 
+         VulkanCommandList(VulkanCommandQueue *queue);
+         ~VulkanCommandList() override;
+@@ -417,6 +461,12 @@ namespace plume {
+         std::unique_ptr<RenderBuffer> nullBuffer;
+         bool loadStoreOpNoneSupported = false;
+         bool nullDescriptorSupported = false;
++#if PLUME_VULKAN_CREATE_HOOKS
++        // Set by deviceCreated only when attachmentFragmentShadingRate was enabled.
++        PFN_vkCmdSetFragmentShadingRateKHR cmdSetFragmentShadingRate = nullptr;
++        // Actual render-pass starts, rather than framebuffer binds; diagnostic counters only.
++        std::atomic<uint64_t> shadingRatePasses = 0;
++#endif
+ 
+         VulkanDevice(VulkanInterface *renderInterface, const std::string &preferredDeviceName);
+         ~VulkanDevice() override;
+@@ -466,4 +516,49 @@ namespace plume {
+         const std::vector<std::string> &getDeviceNames() const override;
+         bool isValid() const;
+     };
++
++#if PLUME_VULKAN_CREATE_HOOKS
++    // Lets a host create the instance and device itself (an OpenXR runtime through
++    // XR_KHR_vulkan_enable2) and pick the physical device. Every hook is optional; a null hook
++    // keeps plume's own behaviour. Set them before creating the interface.
++    struct VulkanCreateHooks {
++        void *user = nullptr;
++        VkResult (*createInstance)(void *user, const VkInstanceCreateInfo *createInfo, VkInstance *instance) = nullptr;
++        // VK_NULL_HANDLE keeps plume's own choice.
++        VkPhysicalDevice (*pickPhysicalDevice)(void *user, VkInstance instance) = nullptr;
++        VkResult (*createDevice)(void *user, VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *createInfo, VkDevice *device) = nullptr;
++        // Called once the device is complete. Every queue's mutex exists by then.
++        void (*deviceCreated)(void *user, VulkanDevice *device) = nullptr;
++    };
++
++    void SetVulkanCreateHooks(const VulkanCreateHooks &hooks);
++    const VulkanCreateHooks &GetVulkanCreateHooks();
++
++    // The mutex plume holds while it submits to the native queue (family, index), for a host that
++    // shares the queue with another API (OpenXR's frame calls). Null if the queue does not exist.
++    std::mutex *GetVulkanQueueMutex(VulkanDevice *device, uint32_t familyIndex, uint32_t queueIndex);
++
++    // Render passes begun by command lists recorded on the calling thread, and their total area
++    // in pixels, for a host's frame statistics. The host resets them.
++    struct VulkanPassStats {
++        uint64_t begins = 0;
++        uint64_t pixels = 0;
++    };
++
++    VulkanPassStats &GetVulkanPassStats();
++
++    // Render pass choices for tiling GPUs, set by a host before any framebuffer is created.
++    struct VulkanPassOptions {
++        // A clear of a whole attachment recorded before the render pass begins becomes the pass's
++        // LOAD_OP_CLEAR instead of vkCmdClearAttachments inside it (which, on Adreno, also turns
++        // low-resolution Z off until the next real clear).
++        bool deferFullClears = false;
++        // Read-only depth attachments load (LOAD_OP_LOAD, STORE_OP_NONE) instead of NONE/NONE,
++        // so the driver can keep its depth acceleration state valid across the pass.
++        bool loadReadOnlyDepth = false;
++    };
++
++    void SetVulkanPassOptions(const VulkanPassOptions &options);
++    const VulkanPassOptions &GetVulkanPassOptions();
++#endif
+ };

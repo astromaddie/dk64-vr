@@ -1,0 +1,3720 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 79dfc38..95f3bc4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -106,6 +106,12 @@ set(ANDROID_ABI arm64-v8a)
+ set (DXC_COMMON_OPTS "-I${PROJECT_SOURCE_DIR}/src")
+ set (DXC_DXIL_OPTS "-Wno-ignored-attributes")
+ set (DXC_SPV_OPTS "-spirv" "-fspv-target-env=vulkan1.0" "-fvk-use-dx-layout")
++# VR builds: shader changes for tiling GPUs (see RT64_VR_SHADERS in the raster shaders).
++if (RT64_VR)
++    # SPIR-V 1.3 for the wave operations the VR texture sampler uses (Vulkan 1.1).
++    list(TRANSFORM DXC_SPV_OPTS REPLACE "vulkan1\\.0" "vulkan1.1")
++    list(APPEND DXC_SPV_OPTS "-D" "RT64_VR_SHADERS")
++endif()
+ set (DXC_LB_OPTS "${DXC_COMMON_OPTS}" "-D" "LIBRARY" "-T" "lib_6_3")
+ set (DXC_PS_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_3")
+ set (DXC_VS_OPTS "${DXC_COMMON_OPTS}" "-E" "VSMain" "-T vs_6_3" "-fvk-invert-y")
+@@ -113,10 +119,22 @@ set (DXC_CS_OPTS "${DXC_COMMON_OPTS}" "-E" "CSMain" "-T cs_6_3")
+ set (DXC_GS_OPTS "${DXC_COMMON_OPTS}" "-E" "GSMain" "-T gs_6_3")
+ set (DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-target-env=vulkan1.1spirv1.4" "-fspv-extension=SPV_KHR_ray_tracing" "-fspv-extension=SPV_EXT_descriptor_indexing")
+ 
++function(projection_shader_dependencies FILENAME)
++    set(deps)
++    if(FILENAME MATCHES "(RSPProcessCS|RasterVS|RasterPS)\\.hlsl$")
++        list(APPEND deps "${PROJECT_SOURCE_DIR}/src/shared/rt64_projection_fog.h")
++    endif()
++    if(FILENAME MATCHES "(RasterVS|RasterPS)\\.hlsl$")
++        list(APPEND deps "${PROJECT_SOURCE_DIR}/src/shared/rt64_raster_params.h")
++    endif()
++    set(PROJECTION_SHADER_DEPS ${deps} PARENT_SCOPE)
++endfunction()
++
+ function(build_shader_spirv_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
++    projection_shader_dependencies("${FILENAME}")
+     add_custom_command(OUTPUT ${OUTNAME}.spv
+         COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
+-        DEPENDS ${FILENAME})
++        DEPENDS ${FILENAME} ${PROJECTION_SHADER_DEPS})
+     add_custom_command(OUTPUT ${OUTNAME}.spirv.c
+         COMMAND file_to_c ${OUTNAME}.spv ${TARGET_NAME}BlobSPIRV ${OUTNAME}.spirv.c ${OUTNAME}.spirv.h
+         DEPENDS ${OUTNAME}.spv file_to_c
+@@ -125,9 +143,10 @@ function(build_shader_spirv_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
+ endfunction()
+ 
+ function(build_shader_dxil_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
++    projection_shader_dependencies("${FILENAME}")
+     add_custom_command(OUTPUT ${OUTNAME}.dxil
+         COMMAND ${DXC} ${DXC_DXIL_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.dxil
+-        DEPENDS ${FILENAME})
++        DEPENDS ${FILENAME} ${PROJECTION_SHADER_DEPS})
+     add_custom_command(OUTPUT ${OUTNAME}.dxil.c
+         COMMAND file_to_c ${OUTNAME}.dxil ${TARGET_NAME}BlobDXIL ${OUTNAME}.dxil.c ${OUTNAME}.dxil.h
+         DEPENDS ${OUTNAME}.dxil file_to_c
+@@ -136,9 +155,10 @@ function(build_shader_dxil_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
+ endfunction()
+ 
+ function(build_shader_msl_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
++    projection_shader_dependencies("${FILENAME}")
+     add_custom_command(OUTPUT ${OUTNAME}.spv
+             COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
+-            DEPENDS ${FILENAME})
++            DEPENDS ${FILENAME} ${PROJECTION_SHADER_DEPS})
+     add_custom_command(OUTPUT ${OUTNAME}.metal
+             COMMAND spirv_cross_msl ${OUTNAME}.spv ${OUTNAME}.metal
+             DEPENDS ${OUTNAME}.spv spirv_cross_msl)
+@@ -430,6 +450,11 @@ if (WIN32)
+     include_directories("${PROJECT_SOURCE_DIR}/src/contrib/dxc/inc")
+ endif()
+ 
++# The optional VR host interface (src/hle/rt64_vr.h), for applications that define RT64_VR.
++if (RT64_VR)
++    list(APPEND SOURCES "${PROJECT_SOURCE_DIR}/src/hle/rt64_vr.cpp" "${PROJECT_SOURCE_DIR}/src/hle/rt64_vr_hud.cpp")
++endif()
++
+ if (${RT64_STATIC})
+     add_library(rt64 STATIC ${SOURCES})
+ else()
+@@ -553,6 +578,12 @@ build_vertex_shader( rt64 "src/shaders/Im3DVS.hlsl")
+ build_pixel_shader(  rt64 "src/shaders/ComposePS.hlsl")
+ build_pixel_shader(  rt64 "src/shaders/DebugPS.hlsl")
+ build_pixel_shader(  rt64 "src/shaders/Im3DPS.hlsl")
++if (RT64_VR)
++    build_pixel_shader(rt64 "src/shaders/VrHudSolvePS.hlsl")
++    build_pixel_shader(rt64 "src/shaders/VrEyeCopyPS.hlsl")
++    build_vertex_shader(rt64 "src/shaders/VrMaskVS.hlsl")
++    build_pixel_shader(rt64 "src/shaders/VrMaskPS.hlsl")
++endif()
+ build_pixel_shader(  rt64 "src/shaders/PostProcessPS.hlsl")
+ 
+ target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/src)
+diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
+index ee8bc1f..fc932b7 100644
+--- a/src/hle/rt64_application.cpp
++++ b/src/hle/rt64_application.cpp
+@@ -30,6 +30,19 @@ namespace plume {
+ }
+ 
+ namespace RT64 {
++#if RT64_VR
++    // The VR eye passes copy RT64's 8-bit main color image straight into the eye images and
++    // render it twice a display frame: no MSAA, no high-precision targets, and no RT64 frame
++    // generation (the host's display frames drive interpolation).
++    static void sanitizeUserConfigForVr(UserConfiguration &config) {
++        if (GetVrHost() != nullptr) {
++            config.antialiasing = UserConfiguration::Antialiasing::None;
++            config.internalColorFormat = UserConfiguration::InternalColorFormat::Standard;
++            config.refreshRate = UserConfiguration::RefreshRate::Original;
++        }
++    }
++#endif
++
+     // Constants
+ 
+     static std::unique_ptr<RenderInterface> CreateVulkanInterfaceWrapper(RenderWindow renderWindow) {
+@@ -99,6 +112,10 @@ namespace RT64 {
+             saveConfiguration();
+         }
+ 
++#   if RT64_VR
++        sanitizeUserConfigForVr(userConfig);
++#   endif
++
+         // Create the interpreter and its associated state.
+         interpreter = std::make_unique<Interpreter>();
+         state = std::make_unique<State>(core.RDRAM, core.MI_INTR_REG, core.checkInterrupts);
+@@ -541,6 +558,10 @@ namespace RT64 {
+         }
+ #   endif
+ 
++#   if RT64_VR
++        sanitizeUserConfigForVr(userConfig);
++#   endif
++
+         // Destroy shader cache by waiting for the queues to be idle.
+         destroyShaderCache();
+ 
+@@ -748,6 +769,9 @@ namespace RT64 {
+     }
+ 
+     void Application::updateUserConfig(bool discardFBs) {
++#   if RT64_VR
++        sanitizeUserConfigForVr(userConfig);
++#   endif
+         sharedQueueResources->setUserConfig(userConfig, discardFBs);
+     }
+ 
+diff --git a/src/hle/rt64_application.h b/src/hle/rt64_application.h
+index 6c83fe0..123b90f 100644
+--- a/src/hle/rt64_application.h
++++ b/src/hle/rt64_application.h
+@@ -26,6 +26,10 @@
+ #include "rt64_interpreter.h"
+ #include "rt64_shared_queue_resources.h"
+ 
++#if RT64_VR
++#   include "rt64_vr.h"
++#endif
++
+ #if RT_ENABLED
+ #   include "render/rt64_raytracing_shader_cache.h"
+ #endif
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 7de5b69..64de65e 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -298,6 +298,89 @@ namespace RT64 {
+                 frameCountersNextPresented = frameCounters.count;
+             }
+ 
++#       if RT64_VR
++            // VR: the flat output goes to the host's panel image instead of the window, without
++            // RT64's own pacing (the display paces the workload thread).
++            VrHost *vrHost = GetVrHost();
++            if (vrHost != nullptr) {
++                // Waiting for a panel image can depend on the workload thread ending a display frame,
++                // so it never happens under the workload mutex. The eye passes render into the main
++                // color image every display frame, so the panel then reads it under that mutex.
++                if (lockedWorkloadMutex) {
++                    ext.sharedResources->workloadMutex.unlock();
++                    lockedWorkloadMutex = false;
++                }
++
++                RenderTexture *panelTexture = nullptr;
++                uint32_t panelWidth = 0;
++                uint32_t panelHeight = 0;
++                RenderFramebuffer *panelFramebuffer = (i < framesToPresent) ? vrHost->panelAcquire(&panelTexture, &panelWidth, &panelHeight) : nullptr;
++                ext.sharedResources->workloadMutex.lock();
++                lockedWorkloadMutex = true;
++                if (panelFramebuffer != nullptr) {
++                    RenderCommandList *commandList = ext.presentGraphicsWorker->commandList.get();
++                    commandList->begin();
++                    const bool uiOnly = vrHost->panelUiOnly();
++                    VIRenderer::RenderParams renderParams;
++                    if ((colorTarget != nullptr) && !uiOnly) {
++                        renderParams.device = ext.device;
++                        renderParams.commandList = commandList;
++                        renderParams.shaderLibrary = ext.shaderLibrary;
++                        renderParams.textureFormat = colorTarget->format;
++                        renderParams.resolutionScale = colorTarget->resolutionScale;
++                        renderParams.downsamplingScale = 1;
++                        renderParams.filtering = filtering;
++                        renderParams.vi = &present.screenVI;
++                        renderParams.removeBlackBorders = removeBlackBorders;
++                        renderParams.targetWidth = panelWidth;
++                        renderParams.targetHeight = panelHeight;
++                        colorTarget->resolveTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
++                        renderParams.texture = colorTarget->getResolvedTexture();
++                        renderParams.textureWidth = colorTarget->width;
++                        renderParams.textureHeight = colorTarget->height;
++                    }
++
++                    commandList->setFramebuffer(panelFramebuffer);
++                    commandList->clearColor(0, uiOnly ? RenderColor(0.0f, 0.0f, 0.0f, 0.0f) : RenderColor());
++                    if (renderParams.texture != nullptr) {
++                        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
++                        viRenderer->render(renderParams);
++                    }
++
++                    RenderHookDraw *drawHook = GetRenderHookDraw();
++                    if (drawHook != nullptr) {
++                        drawHook(commandList, panelFramebuffer);
++                    }
++
++                    commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(panelTexture, RenderTextureLayout::COLOR_WRITE));
++                    commandList->end();
++                    ext.presentGraphicsWorker->execute();
++                    ext.presentGraphicsWorker->wait();
++                    vrHost->panelRelease();
++                }
++
++                if (lockedWorkloadMutex) {
++                    ext.sharedResources->workloadMutex.unlock();
++                    lockedWorkloadMutex = false;
++                }
++
++                if (frameCountersNextPresented > 0) {
++                    {
++                        std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
++                        frameCounters.presented = frameCountersNextPresented;
++                    }
++
++                    ext.sharedResources->interpolatedCondition.notify_all();
++                }
++
++                if (i == 0) {
++                    notifyPresentId(present);
++                }
++
++                continue;
++            }
++#       endif
++
+             uint32_t swapChainIndex = 0;
+             const bool presentFrame = (i < framesToPresent) && swapChainValid;
+             if (presentFrame) {
+diff --git a/src/hle/rt64_present_queue.h b/src/hle/rt64_present_queue.h
+index e08b02c..46c6fb2 100644
+--- a/src/hle/rt64_present_queue.h
++++ b/src/hle/rt64_present_queue.h
+@@ -12,6 +12,10 @@
+ #include "rt64_present.h"
+ #include "rt64_shared_queue_resources.h"
+ 
++#if RT64_VR
++#   include "rt64_vr.h"
++#endif
++
+ #define PRESENT_QUEUE_SIZE 4
+ 
+ namespace RT64 {
+diff --git a/src/hle/rt64_rsp.cpp b/src/hle/rt64_rsp.cpp
+index 1da2550..c8fc1b5 100644
+--- a/src/hle/rt64_rsp.cpp
++++ b/src/hle/rt64_rsp.cpp
+@@ -468,6 +468,9 @@ namespace RT64 {
+             drawData.viewTransforms.emplace_back(hlslpp::mul(extended.invViewMatrix, viewMatrixStack[projectionMatrixStackSize - 1]));
+             drawData.projTransforms.emplace_back(hlslpp::mul(extended.invProjMatrix, projMatrixStack[projectionMatrixStackSize - 1]));
+             drawData.viewProjTransforms.emplace_back(hlslpp::mul(extended.invViewProjMatrix, viewProjMatrixStack[projectionMatrixStackSize - 1]));
++#       if RT64_VR
++            drawData.viewProjFogRemaps.emplace_back(1.0f, 0.0f);
++#       endif
+             drawData.viewProjTransformGroups.emplace_back(extended.curViewProjMatrixIdGroupIndex);
+             drawData.rspViewports.emplace_back(viewportStack[viewportStackSize - 1]);
+             drawData.viewportOrigins.emplace_back(extended.viewportOriginStack[viewportStackSize - 1]);
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 2970e71..77a2181 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -4,6 +4,10 @@
+ 
+ #include "rt64_state.h"
+ 
++#if RT64_VR
++#   include "rt64_vr.h"
++#endif
++
+ #include <cassert>
+ #include <cinttypes>
+ 
+@@ -1131,6 +1135,9 @@ namespace RT64 {
+         // Upload the transforms directly.
+         ext.transformsUploader->submit(ext.framebufferGraphicsWorker, {
+             { workload.drawData.viewProjTransforms.data(), workload.drawRanges.viewProjTransforms, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &workload.drawBuffers.viewProjTransformsBuffer},
++#       if RT64_VR
++            { workload.drawData.viewProjFogRemaps.data(), workload.drawRanges.viewProjTransforms, sizeof(interop::float2), RenderBufferFlag::STORAGE, { }, &workload.drawBuffers.viewProjFogRemapsBuffer},
++#       endif
+             { workload.drawData.worldTransforms.data(), workload.drawRanges.worldTransforms, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &workload.drawBuffers.worldTransformsBuffer},
+         });
+ 
+@@ -1866,7 +1873,14 @@ namespace RT64 {
+         present.fbOperations.clear();
+         present.storage.clear();
+ 
+-        const bool presentEarly = !ext.presentQueue->viewRDRAM && (ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
++        bool presentEarly = !ext.presentQueue->viewRDRAM && (ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
++        bool presentAlways = false;
++#   if RT64_VR
++        if (!fromEarlyPresent && (GetVrHost() != nullptr) && GetVrHost()->presentWithoutWorkloads()) {
++            presentEarly = false;
++            presentAlways = true;
++        }
++#   endif
+         const uint32_t screenFbAddress = newVI.fbAddress();
+         const hlslpp::uint2 screenFbSize = newVI.fbSize();
+         const uint8_t screenFbSiz = newVI.fbSiz();
+@@ -1948,7 +1962,7 @@ namespace RT64 {
+         }
+         
+         // We only push a new present event to the timeline when it's necessary.
+-        if (fromEarlyPresent || viDifferent || fbChangesMade || screenChangesMade) {
++        if (fromEarlyPresent || viDifferent || fbChangesMade || screenChangesMade || presentAlways) {
+             // Push a new renderer event to the timeline for presenting this VI.
+             present.screenVI = newVI;
+             advancePresent(present, false);
+@@ -2801,4 +2815,4 @@ namespace RT64 {
+             break;
+         }
+     }
+-};
+\ No newline at end of file
++};
+diff --git a/src/hle/rt64_vr.cpp b/src/hle/rt64_vr.cpp
+new file mode 100644
+index 0000000..94af309
+--- /dev/null
++++ b/src/hle/rt64_vr.cpp
+@@ -0,0 +1,19 @@
++//
++// RT64
++//
++
++#include "rt64_vr.h"
++
++#include <atomic>
++
++namespace RT64 {
++    static std::atomic<VrHost *> vrHost = nullptr;
++
++    void SetVrHost(VrHost *host) {
++        vrHost = host;
++    }
++
++    VrHost *GetVrHost() {
++        return vrHost;
++    }
++};
+diff --git a/src/hle/rt64_vr.h b/src/hle/rt64_vr.h
+new file mode 100644
+index 0000000..fbadbd1
+--- /dev/null
++++ b/src/hle/rt64_vr.h
+@@ -0,0 +1,196 @@
++//
++// RT64
++//
++// Optional VR host interface. A host (an OpenXR layer in the application) can take over the
++// workload thread's pacing and output: it waits for and begins each display frame, chooses
++// between stereo eye passes and a flat render, places the camera for each eye, and receives the
++// finished eye images and the flat output (as a panel). Without a host, RT64 runs as before.
++// Compiled only with RT64_VR.
++//
++
++#pragma once
++
++#include <cstdint>
++
++#include "common/rt64_plume.h"
++#include "shared/rt64_vr_billboard.h"
++
++namespace RT64 {
++    struct VrFrame {
++        enum class Mode {
++            // No display frame (no session yet, or it stopped): consume and render as usual.
++            None,
++            // A display frame without eye passes (a panel, standby, the probe): consume and render
++            // each new workload once, flat.
++            Flat,
++            // Eye passes: the held pair of game frames is rendered once per eye every frame.
++            Stereo
++        };
++
++        Mode mode = Mode::None;
++        uint32_t eyeWidth = 0;
++        uint32_t eyeHeight = 0;
++        // Height of the flat output in pixels (the panel); 0 keeps RT64's own resolution.
++        uint32_t flatHeight = 0;
++    };
++
++    struct VrWorkloadInfo {
++        uint32_t viOriginalRate = 0;
++        uint32_t cameraProjections = 0;  // perspective projections taken as the game camera
++        bool cameraFromGroup = false;    // found through the camera's matrix groups
++        uint32_t mainColorAddress = 0;
++        uint32_t viWidth = 0;
++        uint32_t viHeight = 0;
++        // 2D draws after the camera in the main color image that are taken out of the eye passes
++        // and drawn into the HUD image instead (see hudAcquire).
++        uint32_t hudCalls = 0;
++        // A hash of everything those draws depend on: equal signatures draw the same HUD.
++        uint64_t hudSignature = 0;
++        // Diagnostics: which parts of the signature changed since the last game frame (bits:
++        // call state, colours, textures, positions, texcoords, vertex colours, world matrices).
++        uint32_t hudChangedParts = 0;
++        // The first camera projection's scissor, as fractions of the frame (0 top, 1 bottom):
++        // the picture between letterbox bars.
++        float cameraTop = 0.0f;
++        float cameraBottom = 1.0f;
++        // Its viewport, as fractions of the frame: the camera's projection spans these rows (DK64
++        // narrows the viewport, and the projection's aspect, to the letterbox band).
++        float viewportTop = 0.0f;
++        float viewportBottom = 1.0f;
++        // The game camera's view (row-major 4x4, RT64's row-vector convention) as the game set it
++        // for this frame, before any interpolation: the first camera projection's, preferring the
++        // primary camera group. The host's camera smoothing keeps a history of these.
++        bool cameraViewValid = false;
++        float cameraView[16] = {};
++    };
++
++    // One eye pass, for the host's frame statistics.
++    struct VrEyeStats {
++        double cpuMs = 0.0;          // wall time of the whole pass on the workload thread
++        double recordMs = 0.0;       // CPU until the submission
++        double submitMs = 0.0;       // the submission call itself
++        double waitMs = 0.0;         // waiting for the GPU to finish (0 for a deferred pass)
++        double gpuMs = 0.0;          // RT64's passes (timestamps around the framebuffer pairs)
++        double gpuCopyMs = 0.0;      // after them: the eye copy (and the HUD solve)
++        uint32_t renderPasses = 0;   // render passes begun
++        double passMpx = 0.0;        // their total area, millions of pixels
++        uint32_t draws = 0;
++        uint32_t uberDraws = 0;      // drawn with the ubershader (no specialized pipeline yet)
++        uint32_t decalDraws = 0;
++        uint32_t depthSwitches = 0;  // depth-write <-> depth-read framebuffer switches
++        uint32_t testZ = 0;
++        uint32_t clears = 0;
++    };
++
++    class VrHost {
++    public:
++        virtual ~VrHost() = default;
++
++        // Workload thread. Waits for and begins the next display frame (or returns Mode::None at
++        // once when there is none).
++        virtual VrFrame beginFrame() = 0;
++
++        // Workload thread. A new game frame was consumed during the current display frame.
++        virtual void workloadArrived(const VrWorkloadInfo &info) = 0;
++
++        // Workload thread. Interpolation weights for the current display frame (cur) and the one
++        // before it (prev).
++        virtual void frameWeights(float &curWeight, float &prevWeight) = 0;
++
++        // Matrix groups that mark the game's camera projection (up to two; 0 = unused). When no
++        // perspective projection in the main color image carries one, every perspective
++        // projection drawn there is taken as the camera.
++        virtual void cameraGroups(uint32_t &primary, uint32_t &secondary) const = 0;
++
++        // Perspective projections drawn into the main color image after the camera that carry
++        // none of the camera groups (only when the camera was found by its group). False keeps
++        // them in the eye passes (DK64); true sends them to the HUD, for games that draw 3D HUD
++        // items through their own perspective projection (Banjo-Kazooie's honeycombs, notes and
++        // jiggies, PROJECTION_HUD_TRANSFORM_ID).
++        virtual bool perspectiveHudAfterCamera() const { return false; }
++
++        // Workload thread, eye passes. Replaces a camera projection's interpolated view and
++        // projection (row-major 4x4, RT64's row-vector convention) for one eye.
++        virtual void eyeCamera(uint32_t eye, const float view[16], const float proj[16], float outView[16], float outProj[16]) = 0;
++
++        // Matrix groups whose model matrices are camera-facing billboards (rt64_vr_billboard.h).
++        // In eye passes RT64 turns them to face billboardViewpoint after interpolation. None by
++        // default.
++        virtual uint32_t billboardGroups(const VrBillboardGroup **groups) const { return 0; }
++
++        // Workload thread, eye passes, right after eyeCamera for the same projection (only when
++        // billboardGroups names any): the point billboards face, in the world space of the view
++        // eyeCamera was given, from the same pose as the eye's view. False leaves them facing the
++        // game camera (a cinema screen). The billboards of a workload face the point given for the
++        // camera projection in the primary camera group, else for its first camera projection.
++        virtual bool billboardViewpoint(uint32_t eye, float point[3]) { return false; }
++
++        // Workload thread, eye passes. Records the copy of the finished eye image (the main color
++        // target, its top-left width x height) into the eye's output, in the pass's command list
++        // before it is submitted. The source is in the SHADER_READ layout and must be left there.
++        // `drawn`: RT64 already drew the image into eyeFramebuffer's framebuffer; the host only
++        // finishes its own bookkeeping (dumps) and leaves that image in COLOR_WRITE.
++        virtual void recordEye(uint32_t eye, RenderCommandList *commandList, RenderTexture *source, uint32_t width, uint32_t height, bool drawn) = 0;
++        // Workload thread, eye passes. The eye's output image as an R8G8B8A8_UNORM colour
++        // attachment in COLOR_WRITE (a view of the swapchain image keeping its bits), for RT64
++        // to draw the finished image into. Null: RT64 lets recordEye copy it.
++        virtual RenderFramebuffer *eyeFramebuffer(uint32_t eye, uint32_t *width, uint32_t *height) = 0;
++
++        // Workload thread, eye passes. The eye's commands completed on the GPU.
++        virtual void eyeDone(uint32_t eye, const VrEyeStats &stats) = 0;
++
++        // Workload thread, eye passes. The headset's hidden-area triangles for the eye: a triangle
++        // list of x, y pairs in the eye image's normalized device coordinates (y up), or 0 when
++        // there are none. RT64 draws them at the near plane before the eye's scene, so depth-tested
++        // draws skip pixels the lenses never show.
++        virtual uint32_t hiddenMesh(uint32_t eye, const float **ndcXY) = 0;
++
++        // Optional: a companion framebuffer with a rate attachment for this eye's main
++        // raster pass only. Normal images stay authoritative/sampleable. The host can
++        // decline (off, cinema, unsupported) by returning the original framebuffer.
++        virtual RenderFramebuffer *foveatedFramebuffer(uint32_t eye, RenderCommandList *commandList, RenderFramebuffer *framebuffer) {
++            return framebuffer;
++        }
++        // Full-rate exceptions inside an attached pass (pixel-exact dither/decals/2D).
++        virtual void setFoveationRate(RenderCommandList *commandList, bool useAttachment) {}
++
++        // Workload thread, diagnostics. When this returns true for a new workload, RT64 measures the
++        // world-space height range of the vertices drawn through the camera whose model matrix and
++        // position lie within `radius` (horizontally) of `center`, and reports it to playerExtent.
++        virtual bool wantPlayerExtent(float center[3], float &radius) = 0;
++        virtual void playerExtent(float minY, float maxY, uint32_t vertexCount) = 0;
++
++        // Workload thread, eye passes, a display frame that consumed a new game frame. The HUD (the
++        // workload's `hudCalls` 2D draws, which the eye passes leave out) is rendered over black
++        // and over white and solved into the returned framebuffer: an R8G8B8A8_UNORM colour
++        // attachment in COLOR_WRITE (left there), the size of the eye image. Null skips the HUD.
++        // hudRecorded follows once those commands completed.
++        virtual RenderFramebuffer *hudAcquire(uint32_t hudCalls, uint64_t hudSignature, uint32_t *width, uint32_t *height) = 0;
++        virtual void hudRecorded(double cpuMs, double gpuMs) = 0;
++
++        // Workload thread. Ends the display frame begun by beginFrame (any mode but None).
++        virtual void endFrame() = 0;
++
++        // Present thread. The image the flat output should be drawn into instead of the window's
++        // swap chain, ready for drawing (COLOR_WRITE). Null when there is none this time; the
++        // present is then skipped. Released by panelRelease once its commands completed.
++        virtual RenderFramebuffer *panelAcquire(RenderTexture **texture, uint32_t *width, uint32_t *height) = 0;
++        virtual void panelRelease() = 0;
++
++        // Present thread, after a successful panelAcquire: true draws only the UI hook into the
++        // panel image, over transparent black (a menu that floats over the world), without the
++        // game's output under it.
++        virtual bool panelUiOnly() { return false; }
++
++        // VI thread: true makes every screen update a present, also in present-early mode and when
++        // nothing on screen changed (presents otherwise follow the game's workloads): a host menu
++        // drawn by the UI hook over a paused game.
++        virtual bool presentWithoutWorkloads() { return false; }
++
++        // Workload thread, when it exits.
++        virtual void threadExit() = 0;
++    };
++
++    void SetVrHost(VrHost *host);
++    VrHost *GetVrHost();
++};
+diff --git a/src/hle/rt64_vr_hud.cpp b/src/hle/rt64_vr_hud.cpp
+new file mode 100644
+index 0000000..0dc6021
+--- /dev/null
++++ b/src/hle/rt64_vr_hud.cpp
+@@ -0,0 +1,181 @@
++//
++// RT64
++//
++
++#include "rt64_vr_hud.h"
++
++#include <cstdlib>
++
++#include "shaders/FullScreenVS.hlsl.spirv.h"
++#include "shaders/VrHudSolvePS.hlsl.spirv.h"
++#include "shaders/VrEyeCopyPS.hlsl.spirv.h"
++#include "shaders/VrMaskVS.hlsl.spirv.h"
++#include "shaders/VrMaskPS.hlsl.spirv.h"
++
++#include <cstring>
++
++namespace RT64 {
++    bool VrEyeCopier::setup(RenderDevice *device) {
++        VrEyeCopyDescriptorSet layoutSet;
++        RenderPipelineLayoutBuilder layoutBuilder;
++        layoutBuilder.begin();
++        layoutBuilder.addDescriptorSet(layoutSet);
++        layoutBuilder.end();
++        pipelineLayout = layoutBuilder.create(device);
++
++        std::unique_ptr<RenderShader> vertexShader = device->createShader(FullScreenVSBlobSPIRV, sizeof(FullScreenVSBlobSPIRV), "VSMain", RenderShaderFormat::SPIRV);
++        std::unique_ptr<RenderShader> pixelShader = device->createShader(VrEyeCopyPSBlobSPIRV, sizeof(VrEyeCopyPSBlobSPIRV), "PSMain", RenderShaderFormat::SPIRV);
++        RenderGraphicsPipelineDesc pipelineDesc;
++        pipelineDesc.pipelineLayout = pipelineLayout.get();
++        pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
++        pipelineDesc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
++        pipelineDesc.renderTargetCount = 1;
++        pipelineDesc.vertexShader = vertexShader.get();
++        pipelineDesc.pixelShader = pixelShader.get();
++        pipeline = device->createGraphicsPipeline(pipelineDesc);
++        for (uint32_t eye = 0; eye < 2; eye++) {
++            descriptorSets[eye] = std::make_unique<VrEyeCopyDescriptorSet>(device);
++        }
++
++        return (pipeline != nullptr);
++    }
++
++    void VrEyeCopier::record(RenderCommandList *commandList, uint32_t eye, RenderTexture *source, RenderFramebuffer *dst, uint32_t width, uint32_t height) {
++        if ((pipeline == nullptr) || (dst == nullptr) || (source == nullptr) || (eye > 1)) {
++            return;
++        }
++
++        if (source != boundSource[eye]) {
++            // The workload thread waits for every submission it makes, so the set is idle here.
++            descriptorSets[eye]->setTexture(descriptorSets[eye]->gSource, source, RenderTextureLayout::SHADER_READ);
++            boundSource[eye] = source;
++        }
++
++        commandList->setFramebuffer(dst);
++        commandList->setPipeline(pipeline.get());
++        commandList->setGraphicsPipelineLayout(pipelineLayout.get());
++        commandList->setGraphicsDescriptorSet(descriptorSets[eye]->get(), 0);
++        commandList->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
++        commandList->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
++        commandList->setVertexBuffers(0, nullptr, 0, nullptr);
++        commandList->drawInstanced(3, 1, 0, 0);
++        commandList->setFramebuffer(nullptr);
++    }
++
++    bool VrHiddenMask::setup(RenderDevice *device) {
++        this->device = device;
++        RenderPipelineLayoutBuilder layoutBuilder;
++        layoutBuilder.begin(false, true);
++        layoutBuilder.end();
++        pipelineLayout = layoutBuilder.create(device);
++
++        static const RenderInputSlot slots[] = { RenderInputSlot(0, sizeof(float) * 2) };
++        static const RenderInputElement elements[] = { RenderInputElement("POSITION", 0, 0, RenderFormat::R32G32_FLOAT, 0, 0) };
++        std::unique_ptr<RenderShader> vertexShader = device->createShader(VrMaskVSBlobSPIRV, sizeof(VrMaskVSBlobSPIRV), "VSMain", RenderShaderFormat::SPIRV);
++        std::unique_ptr<RenderShader> pixelShader = device->createShader(VrMaskPSBlobSPIRV, sizeof(VrMaskPSBlobSPIRV), "PSMain", RenderShaderFormat::SPIRV);
++        RenderGraphicsPipelineDesc pipelineDesc;
++        pipelineDesc.pipelineLayout = pipelineLayout.get();
++        pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
++        pipelineDesc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
++        pipelineDesc.renderTargetCount = 1;
++        // The scene's own direction (LESS), so the driver's low-resolution Z stays usable.
++        pipelineDesc.depthEnabled = true;
++        pipelineDesc.depthWriteEnabled = true;
++        pipelineDesc.depthFunction = RenderComparisonFunction::LESS;
++        pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
++        pipelineDesc.inputSlots = slots;
++        pipelineDesc.inputSlotsCount = 1;
++        pipelineDesc.inputElements = elements;
++        pipelineDesc.inputElementsCount = 1;
++        pipelineDesc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
++        pipelineDesc.vertexShader = vertexShader.get();
++        pipelineDesc.pixelShader = pixelShader.get();
++        pipeline = device->createGraphicsPipeline(pipelineDesc);
++        return (pipeline != nullptr);
++    }
++
++    void VrHiddenMask::record(RenderCommandList *commandList, uint32_t eye, const float *ndcXY, uint32_t vertexCount, const RenderFramebuffer *framebuffer, uint32_t width, uint32_t height) {
++        if ((pipeline == nullptr) || (eye > 1) || (ndcXY == nullptr) || (vertexCount < 3) || (framebuffer == nullptr)) {
++            return;
++        }
++
++        // One buffer an eye, rewritten each pass: the workload thread has waited for the eye's
++        // previous pass before recording it again.
++        if ((vertexBuffers[eye] == nullptr) || (vertexCapacity[eye] < vertexCount)) {
++            vertexCapacity[eye] = std::max(vertexCount, 256U);
++            vertexBuffers[eye] = device->createBuffer(RenderBufferDesc::VertexBuffer(uint64_t(vertexCapacity[eye]) * sizeof(float) * 2, RenderHeapType::UPLOAD));
++        }
++
++        void *mapped = vertexBuffers[eye]->map();
++        if (mapped == nullptr) {
++            return;
++        }
++
++        memcpy(mapped, ndcXY, size_t(vertexCount) * sizeof(float) * 2);
++        vertexBuffers[eye]->unmap();
++
++        const RenderVertexBufferView view(vertexBuffers[eye].get(), uint32_t(vertexCount * sizeof(float) * 2));
++        const RenderInputSlot slot(0, sizeof(float) * 2);
++        commandList->setFramebuffer(framebuffer);
++        commandList->setPipeline(pipeline.get());
++        commandList->setGraphicsPipelineLayout(pipelineLayout.get());
++        commandList->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
++        commandList->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
++        commandList->setVertexBuffers(0, &view, 1, &slot);
++        commandList->drawInstanced(vertexCount, 1, 0, 0);
++        commandList->setFramebuffer(nullptr);
++    }
++
++    bool VrHudSolver::setup(RenderDevice *device) {
++        VrHudSolveDescriptorSet layoutSet;
++        RenderPipelineLayoutBuilder layoutBuilder;
++        layoutBuilder.begin();
++        layoutBuilder.addPushConstant(0, 0, sizeof(uint32_t) * 3, RenderShaderStageFlag::PIXEL);
++        layoutBuilder.addDescriptorSet(layoutSet);
++        layoutBuilder.end();
++        pipelineLayout = layoutBuilder.create(device);
++
++        std::unique_ptr<RenderShader> vertexShader = device->createShader(FullScreenVSBlobSPIRV, sizeof(FullScreenVSBlobSPIRV), "VSMain", RenderShaderFormat::SPIRV);
++        std::unique_ptr<RenderShader> pixelShader = device->createShader(VrHudSolvePSBlobSPIRV, sizeof(VrHudSolvePSBlobSPIRV), "PSMain", RenderShaderFormat::SPIRV);
++        RenderGraphicsPipelineDesc pipelineDesc;
++        pipelineDesc.pipelineLayout = pipelineLayout.get();
++        pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
++        pipelineDesc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
++        pipelineDesc.renderTargetCount = 1;
++        pipelineDesc.vertexShader = vertexShader.get();
++        pipelineDesc.pixelShader = pixelShader.get();
++        pipeline = device->createGraphicsPipeline(pipelineDesc);
++        descriptorSet = std::make_unique<VrHudSolveDescriptorSet>(device);
++        return (pipeline != nullptr);
++    }
++
++    void VrHudSolver::record(RenderCommandList *commandList, RenderTexture *black, RenderTexture *white, uint32_t srcWidth, uint32_t srcHeight,
++        RenderFramebuffer *dst, uint32_t dstWidth, uint32_t dstHeight)
++    {
++        if ((pipeline == nullptr) || (dst == nullptr)) {
++            return;
++        }
++
++        if ((black != boundBlack) || (white != boundWhite)) {
++            // Descriptor writes must not race a submission still using the set: the workload
++            // thread waits for every submission it makes, so the set is idle here.
++            descriptorSet->setTexture(descriptorSet->gBlack, black, RenderTextureLayout::SHADER_READ);
++            descriptorSet->setTexture(descriptorSet->gWhite, white, RenderTextureLayout::SHADER_READ);
++            boundBlack = black;
++            boundWhite = white;
++        }
++
++        static const bool debugSplit = (getenv("RT64_VR_HUD_DEBUG") != nullptr);
++        const uint32_t size[3] = { srcWidth, srcHeight, debugSplit ? 1U : 0U };
++        commandList->setFramebuffer(dst);
++        commandList->setPipeline(pipeline.get());
++        commandList->setGraphicsPipelineLayout(pipelineLayout.get());
++        commandList->setGraphicsDescriptorSet(descriptorSet->get(), 0);
++        commandList->setGraphicsPushConstants(0, size);
++        commandList->setViewports(RenderViewport(0.0f, 0.0f, float(dstWidth), float(dstHeight)));
++        commandList->setScissors(RenderRect(0, 0, int32_t(dstWidth), int32_t(dstHeight)));
++        commandList->setVertexBuffers(0, nullptr, 0, nullptr);
++        commandList->drawInstanced(3, 1, 0, 0);
++        commandList->setFramebuffer(nullptr);
++    }
++};
+diff --git a/src/hle/rt64_vr_hud.h b/src/hle/rt64_vr_hud.h
+new file mode 100644
+index 0000000..ca03b21
+--- /dev/null
++++ b/src/hle/rt64_vr_hud.h
+@@ -0,0 +1,91 @@
++//
++// RT64
++//
++// VR HUD alpha solve (rt64_vr.h): one full-screen draw from the HUD's black and white renders
++// into the host's HUD image. Compiled only with RT64_VR.
++//
++
++#pragma once
++
++#include <memory>
++
++#include "common/rt64_plume.h"
++#include "render/rt64_descriptor_sets.h"
++
++namespace RT64 {
++    struct VrHudSolveDescriptorSet : RenderDescriptorSetBase {
++        uint32_t gBlack;
++        uint32_t gWhite;
++
++        VrHudSolveDescriptorSet(RenderDevice *device = nullptr) {
++            builder.begin();
++            gBlack = builder.addTexture(1);
++            gWhite = builder.addTexture(2);
++            builder.end();
++
++            if (device != nullptr) {
++                create(device);
++            }
++        }
++    };
++
++    struct VrEyeCopyDescriptorSet : RenderDescriptorSetBase {
++        uint32_t gSource;
++
++        VrEyeCopyDescriptorSet(RenderDevice *device = nullptr) {
++            builder.begin();
++            gSource = builder.addTexture(1);
++            builder.end();
++
++            if (device != nullptr) {
++                create(device);
++            }
++        }
++    };
++
++    // The finished eye image drawn 1:1 into the host's eye image (rt64_vr.h, eyeFramebuffer).
++    class VrEyeCopier {
++    public:
++        bool setup(RenderDevice *device);
++        // source in SHADER_READ; dst an R8G8B8A8_UNORM colour attachment in COLOR_WRITE (left there).
++        void record(RenderCommandList *commandList, uint32_t eye, RenderTexture *source, RenderFramebuffer *dst, uint32_t width, uint32_t height);
++
++    private:
++        std::unique_ptr<RenderPipelineLayout> pipelineLayout;
++        std::unique_ptr<RenderPipeline> pipeline;
++        std::unique_ptr<VrEyeCopyDescriptorSet> descriptorSets[2];
++        RenderTexture *boundSource[2] = {};
++    };
++
++    // The headset's hidden-area mesh drawn into an eye's colour (black) and depth (near plane)
++    // before its scene (rt64_vr.h, hiddenMesh).
++    class VrHiddenMask {
++    public:
++        bool setup(RenderDevice *device);
++        // The framebuffer's colour and depth attachments are in COLOR_WRITE and DEPTH_WRITE.
++        void record(RenderCommandList *commandList, uint32_t eye, const float *ndcXY, uint32_t vertexCount, const RenderFramebuffer *framebuffer, uint32_t width, uint32_t height);
++
++    private:
++        RenderDevice *device = nullptr;
++        std::unique_ptr<RenderPipelineLayout> pipelineLayout;
++        std::unique_ptr<RenderPipeline> pipeline;
++        std::unique_ptr<RenderBuffer> vertexBuffers[2];
++        uint32_t vertexCapacity[2] = {};
++    };
++
++    class VrHudSolver {
++    public:
++        // The destination is an R8G8B8A8_UNORM colour attachment (the host's swapchain image).
++        bool setup(RenderDevice *device);
++        // black and white must be in SHADER_READ; dst in COLOR_WRITE (left there).
++        void record(RenderCommandList *commandList, RenderTexture *black, RenderTexture *white, uint32_t srcWidth, uint32_t srcHeight,
++            RenderFramebuffer *dst, uint32_t dstWidth, uint32_t dstHeight);
++
++    private:
++        std::unique_ptr<RenderPipelineLayout> pipelineLayout;
++        std::unique_ptr<RenderPipeline> pipeline;
++        std::unique_ptr<VrHudSolveDescriptorSet> descriptorSet;
++        RenderTexture *boundBlack = nullptr;
++        RenderTexture *boundWhite = nullptr;
++    };
++};
+diff --git a/src/hle/rt64_workload.cpp b/src/hle/rt64_workload.cpp
+index b4c85f5..4ce4e0d 100644
+--- a/src/hle/rt64_workload.cpp
++++ b/src/hle/rt64_workload.cpp
+@@ -80,6 +80,10 @@ namespace RT64 {
+         drawData.modViewTransforms.clear();
+         drawData.modProjTransforms.clear();
+         drawData.modViewProjTransforms.clear();
++#   if RT64_VR
++        drawData.viewProjFogRemaps.clear();
++        drawData.modViewProjFogRemaps.clear();
++#   endif
+         drawData.prevViewTransforms.clear();
+         drawData.prevProjTransforms.clear();
+         drawData.prevViewProjTransforms.clear();
+@@ -105,6 +109,9 @@ namespace RT64 {
+         drawData.viewTransforms.push_back(interop::float4x4::identity());
+         drawData.projTransforms.push_back(interop::float4x4::identity());
+         drawData.viewProjTransforms.push_back(interop::float4x4::identity());
++#   if RT64_VR
++        drawData.viewProjFogRemaps.emplace_back(1.0f, 0.0f);
++#   endif
+         drawData.worldTransforms.push_back(interop::float4x4::identity());
+         drawData.transformGroups.push_back(TransformGroup());
+         drawData.worldTransformGroups.push_back(0);
+@@ -323,4 +330,4 @@ namespace RT64 {
+             return 0;
+         }
+     }
+-};
+\ No newline at end of file
++};
+diff --git a/src/hle/rt64_workload.h b/src/hle/rt64_workload.h
+index 8ea27d5..aba85e6 100644
+--- a/src/hle/rt64_workload.h
++++ b/src/hle/rt64_workload.h
+@@ -48,6 +48,20 @@ namespace RT64 {
+         std::vector<interop::float4x4> modViewTransforms;
+         std::vector<interop::float4x4> modProjTransforms;
+         std::vector<interop::float4x4> modViewProjTransforms;
++#   if RT64_VR
++        // One fog depth conversion per projection, identity for unmodified/flat projections.
++        std::vector<interop::float2> viewProjFogRemaps;
++        std::vector<interop::float2> modViewProjFogRemaps;
++        // Eye passes: the point this pass's billboards face (VrHost::billboardViewpoint), set by
++        // the projection processor; 0 = none, 1 = from a camera projection, 2 = from the primary
++        // camera group's.
++        uint32_t vrBillboardViewpointRank = 0;
++        float vrBillboardViewpoint[3] = {};
++        // The game camera's position for the same projection (rt64_vr_billboard.h).
++        float vrBillboardGameViewpoint[3] = {};
++        // Diagnostics: the game camera's back axis (RT64_VR_LOG_BILLBOARDS).
++        float vrBillboardGameBack[3] = {};
++#   endif
+         std::vector<interop::float4x4> prevViewTransforms;
+         std::vector<interop::float4x4> prevProjTransforms;
+         std::vector<interop::float4x4> prevViewProjTransforms;
+@@ -159,6 +173,9 @@ namespace RT64 {
+         BufferPair rspLookAtBuffer;
+         BufferPair worldTransformsBuffer;
+         BufferPair viewProjTransformsBuffer;
++#   if RT64_VR
++        BufferPair viewProjFogRemapsBuffer;
++#   endif
+         BufferPair prevWorldTransformsBuffer;
+         BufferPair invTWorldTransformsBuffer;
+         BufferPair triPosBuffer;
+@@ -254,4 +271,4 @@ namespace RT64 {
+         bool addFramebufferPair(uint32_t colorAddress, uint8_t colorFmt, uint8_t colorSiz, uint16_t colorWidth, uint32_t depthAddress);
+         int currentFramebufferPairIndex() const;
+     };
+-};
+\ No newline at end of file
++};
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 5a331aa..0e2da58 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -4,10 +4,17 @@
+ 
+ #include "rt64_workload_queue.h"
+ 
++#include <algorithm>
++
+ #include "common/rt64_thread.h"
+ 
+ #include "rt64_present_queue.h"
+ 
++#if RT64_VR
++#   include <cstring>
++#   include "plume_vulkan.h"
++#endif
++
+ #define ENABLE_HIGH_RESOLUTION_RENDERER 1
+ 
+ namespace RT64 {
+@@ -102,7 +109,15 @@ namespace RT64 {
+         vertexProcessor = std::make_unique<VertexProcessor>(ext.device);
+         framebufferRenderer = std::make_unique<FramebufferRenderer>(ext.workloadGraphicsWorker, true, ext.createdGraphicsAPI, ext.shaderLibrary);
+         renderFramebufferManager = std::make_unique<RenderFramebufferManager>(ext.device);
++#   if RT64_VR
++        // The third timestamp follows the VR eye copy.
++        queryPool = ext.device->createQueryPool(3);
++        if (getenv("RT64_VR_PASS_TIMES") != nullptr) {
++            vrPassMarkPool = ext.device->createQueryPool(128);
++        }
++#   else
+         queryPool = ext.device->createQueryPool(2);
++#   endif
+ 
+         projectionProcessor.setup(ext.workloadGraphicsWorker);
+         transformProcessor.setup(ext.workloadGraphicsWorker);
+@@ -110,6 +125,15 @@ namespace RT64 {
+         lookAtProcessor.setup(ext.workloadGraphicsWorker);
+ 
+         threadsRunning = true;
++#   if RT64_VR
++        // With a VR host the display paces this thread, and the idle keep-alive is not needed.
++        vrHost = GetVrHost();
++        if (vrHost != nullptr) {
++            renderThread = new std::thread(&WorkloadQueue::renderThreadLoopVR, this);
++            return;
++        }
++#   endif
++
+         renderThread = new std::thread(&WorkloadQueue::renderThreadLoop, this);
+         idleThread = new std::thread(&WorkloadQueue::idleThreadLoop, this);
+     }
+@@ -210,6 +234,27 @@ namespace RT64 {
+         workloadConfig.aspectRatioScale = workloadConfig.aspectRatioTarget / workloadConfig.aspectRatioSource;
+         workloadConfig.resolutionScale = { resolutionMultiplier * workloadConfig.aspectRatioScale, resolutionMultiplier };
+         workloadConfig.downsampleMultiplier = ext.sharedResources->userConfig.downsampleMultiplier;
++
++#   if RT64_VR
++        // VR: the eye passes render the main color image at the eye's size, stretched (the eye's
++        // projection supplies the frustum, so there is no aspect correction), and flat renders
++        // at the panel's height in the original aspect.
++        if ((vrHost != nullptr) && (vrFrame.mode != VrFrame::Mode::None)) {
++            const float viWidth = (viFbSize[0] > 0) ? float(viFbSize[0]) : 320.0f;
++            const float viHeight = (viFbSize[1] > 0) ? float(viFbSize[1]) : 240.0f;
++            workloadConfig.aspectRatioTarget = workloadConfig.aspectRatioSource;
++            workloadConfig.aspectRatioScale = 1.0f;
++            workloadConfig.extAspectPercentage = 0.0f;
++            workloadConfig.downsampleMultiplier = 1;
++            if ((vrFrame.mode == VrFrame::Mode::Stereo) && (vrFrame.eyeWidth > 0) && (vrFrame.eyeHeight > 0)) {
++                workloadConfig.resolutionScale = { float(vrFrame.eyeWidth) / viWidth, float(vrFrame.eyeHeight) / viHeight };
++            }
++            else if (vrFrame.flatHeight > 0) {
++                const float scale = float(vrFrame.flatHeight) / viHeight;
++                workloadConfig.resolutionScale = { scale, scale };
++            }
++        }
++#   endif
+         ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
+ 
+         // Find the target refresh rate from the configuration.
+@@ -301,9 +346,19 @@ namespace RT64 {
+         const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
+ 
+         rendererCPUProfiler.start();
++#   if RT64_VR
++        ElapsedTimer vrRecordTimer;
++#   endif
+ 
+         const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
++#   if RT64_VR
++        threadVrFinishSubmission();
++        vrHudCleared = false;
++        vrMaskDrawn = false;
++        const bool processProjections = aspectRatioAdjustment || prevFrame.matched || curFrame.isDebuggerCameraEnabled(*this) || (vrEye >= 0);
++#   else
+         const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
++#   endif
+         bool uploadProjections = false;
+         if (processProjections) {
+             ProjectionProcessor::ProcessParams projParams;
+@@ -314,12 +369,28 @@ namespace RT64 {
+             projParams.curFrameWeight = curFrameWeight;
+             projParams.prevFrameWeight = prevFrameWeight;
+             projParams.aspectRatioScale = workloadConfig.aspectRatioScale;
++#       if RT64_VR
++            if ((vrHost != nullptr) && (vrEye >= 0)) {
++                projParams.vrEye = vrEye;
++                projParams.vrMainColorAddress = vrInfo.mainColorAddress;
++                if (vrInfo.cameraFromGroup) {
++                    vrHost->cameraGroups(projParams.vrCameraGroups[0], projParams.vrCameraGroups[1]);
++                }
++            }
++#       endif
+             projectionProcessor.process(projParams);
+             projectionProcessor.upload(projParams);
+             uploadProjections = true;
+         }
+ 
++#   if RT64_VR
++        // Eye passes with billboards always process the transforms: the billboards are turned there.
++        const VrBillboardGroup *vrBillboardGroups = nullptr;
++        const uint32_t vrBillboardGroupCount = ((vrHost != nullptr) && (vrEye >= 0)) ? vrHost->billboardGroups(&vrBillboardGroups) : 0;
++        const bool processTransforms = prevFrame.matched || ((vrBillboardGroupCount > 0) && (vrBillboardGroups != nullptr));
++#   else
+         const bool processTransforms = prevFrame.matched;
++#   endif
+         bool uploadTransforms = false;
+         if (processTransforms) {
+             TransformProcessor::ProcessParams transformParams;
+@@ -329,6 +400,12 @@ namespace RT64 {
+             transformParams.prevFrame = &prevFrame;
+             transformParams.curFrameWeight = curFrameWeight;
+             transformParams.prevFrameWeight = prevFrameWeight;
++#       if RT64_VR
++            if (vrBillboardGroups != nullptr) {
++                transformParams.vrBillboardGroups = vrBillboardGroups;
++                transformParams.vrBillboardGroupCount = vrBillboardGroupCount;
++            }
++#       endif
+             transformProcessor.process(transformParams);
+             transformProcessor.upload(transformParams);
+             uploadTransforms = true;
+@@ -491,6 +568,12 @@ namespace RT64 {
+                     assert(chosenRt != nullptr);
+                     chosenRt->resolutionScale = fixedResScale;
+                     chosenRt->downsampleMultiplier = downsampleMultiplier;
++#               if RT64_VR
++                    // The eye image is a stretched render of the whole frame: no hor+ alignment.
++                    if ((vrHost != nullptr) && (vrFrame.mode == VrFrame::Mode::Stereo)) {
++                        targetMisalignX = 0;
++                    }
++#               endif
+                     chosenRt->misalignX = targetMisalignX;
+                     chosenRt->invMisalignX = (targetMisalignX > 0) ? (std::lround(fixedResScale.y) - targetMisalignX) : 0;
+ 
+@@ -543,6 +626,28 @@ namespace RT64 {
+                         colorFb->readHeight = 0;
+                     }
+ 
++#               if RT64_VR
++                    // The HUD images are half the main color image's size (a quad of about 40
++                    // degrees needs no more), with a depth target of their own.
++                    if (vrHudInPass() && (colorTarget != nullptr) && (fbPair.colorImage.address == vrInfo.mainColorAddress)) {
++                        const uint32_t hudWidth = (targetWidth + 1) / 2, hudHeight = (targetHeight + 1) / 2;
++                        for (uint32_t h = 0; h < 2; h++) {
++                            if (vrHudTarget[h]->resize(ext.workloadGraphicsWorker, hudWidth, hudHeight)) {
++                                resizedTargets.emplace(vrHudTarget[h].get());
++                            }
++                        }
++
++                        if (vrHudDepthTarget == nullptr) {
++                            vrHudDepthTarget = std::make_unique<RenderTarget>(0, Framebuffer::Type::Depth, RenderMultisampling(), targetManager.usesHDR);
++                            vrHudDepthTarget->setupDepth(ext.workloadGraphicsWorker, hudWidth, hudHeight);
++                        }
++
++                        if (vrHudDepthTarget->resize(ext.workloadGraphicsWorker, hudWidth, hudHeight)) {
++                            resizedTargets.emplace(vrHudDepthTarget.get());
++                        }
++                    }
++#               endif
++
+                     // Set up the dummy target used for rendering the depth if no depth framebuffer is active.
+                     if (depthFb == nullptr) {
+                         if (dummyDepthTarget == nullptr) {
+@@ -639,7 +744,40 @@ namespace RT64 {
+                     drawParams.postBlendNoise = workloadConfig.postBlendNoise;
+                     drawParams.postBlendNoiseNegative = workloadConfig.postBlendNoiseNegative;
+                     drawParams.maxGameCall = std::min(gameCallCountMax - gameCallCursor, fbPair.gameCallCount);
++#               if RT64_VR
++                    // Eye passes stretch the frame to the eye (aspect correction off).
++                    drawParams.vrStretched = (vrEye >= 0);
++                    drawParams.vrEyePass = (vrEye >= 0);
++
++                    // Eye passes leave the HUD out; HUD passes draw only the HUD (rt64_vr.h).
++                    if ((vrHost != nullptr) && (vrPass != VrPass::None) && !vrCallClass.empty()) {
++                        drawParams.vrCallClass = vrCallClass.data();
++                        drawParams.vrCallClassCount = uint32_t(vrCallClass.size());
++                        drawParams.vrSkipMask = (1U << VrCallHud);
++                    }
++#               endif
+                     framebufferRenderer->addFramebuffer(drawParams);
++#               if RT64_VR
++                    // The HUD's calls again, into the black and the white HUD images.
++                    if (vrHudInPass() && (fbPair.colorImage.address == vrInfo.mainColorAddress) && (colorTarget != nullptr)) {
++                        for (uint32_t h = 0; h < 2; h++) {
++                            RenderFramebufferKey hudKey;
++                            hudKey.colorTargetKey = RenderTargetKey(0x7E20 + h, vrHudTarget[h]->width, G_IM_SIZ_32b, Framebuffer::Type::Color);
++                            hudKey.depthTargetKey = RenderTargetKey(0x7E30, vrHudDepthTarget->width, G_IM_SIZ_16b, Framebuffer::Type::Depth);
++                            hudKey.modifierKey = 0x7E2 + h;
++                            RenderFramebufferStorage &hudStorage = renderFramebufferManager->get(hudKey, vrHudTarget[h].get(), vrHudDepthTarget.get());
++                            FramebufferRenderer::DrawParams hudParams = drawParams;
++                            hudParams.vrEyePass = false;
++                            hudParams.fbStorage = &hudStorage;
++                            hudParams.resolutionScale = drawParams.resolutionScale * 0.5f;
++                            hudParams.targetWidth = vrHudTarget[h]->width;
++                            hudParams.targetHeight = vrHudTarget[h]->height;
++                            hudParams.horizontalMisalignment = 0.0f;
++                            hudParams.vrSkipMask = (1U << VrCallEye) | (1U << VrCallOffscreen);
++                            framebufferRenderer->addFramebuffer(hudParams);
++                        }
++                    }
++#               endif
+                 }
+                 
+                 gameCallCursor += fbPair.gameCallCount;
+@@ -699,7 +837,21 @@ namespace RT64 {
+ 
+             workerMutex.lock();
+             ext.workloadGraphicsWorker->commandList->begin();
++#       if RT64_VR
++            ext.workloadGraphicsWorker->commandList->resetQueryPool(queryPool.get(), 0, 3);
++            VrPassMarks &passMarks = GetVrPassMarks();
++            passMarks.count = 0;
++            passMarks.pool = nullptr;
++            const bool passTimes = (vrPassMarkPool != nullptr) && (vrEye >= 0) && ((vrPassMarkFrames++ % 1200) < 2);
++            if (passTimes) {
++                ext.workloadGraphicsWorker->commandList->resetQueryPool(vrPassMarkPool.get(), 0, 128);
++                passMarks.pool = vrPassMarkPool.get();
++                passMarks.capacity = 128;
++                VrPassMark(ext.workloadGraphicsWorker->commandList.get(), 0);
++            }
++#       else
+             ext.workloadGraphicsWorker->commandList->resetQueryPool(queryPool.get(), 0, 2);
++#       endif
+             ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 0);
+             framebufferRenderer->endFramebuffers(ext.workloadGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, workloadConfig.raytracingEnabled);
+             framebufferRenderer->recordSetup(ext.workloadGraphicsWorker, bufferUploaders, processRSP ? rspProcessor.get() : nullptr, processWorldVertices ? vertexProcessor.get() : nullptr, &workload.outputBuffers, workloadConfig.raytracingEnabled);
+@@ -789,7 +941,63 @@ namespace RT64 {
+                         }
+                     }
+                     
++#               if RT64_VR
++                    // The hidden-area mask, once an eye pass, before the eye image's first pair.
++                    if ((vrEye >= 0) && !vrMaskDrawn && (fbPair.colorImage.address == vrInfo.mainColorAddress) && (colorTarget != nullptr) && (depthTarget != nullptr)) {
++                        vrMaskDrawn = true;
++                        const float *maskXY = nullptr;
++                        const uint32_t maskVertices = vrHost->hiddenMesh(uint32_t(vrEye), &maskXY);
++                        if ((maskVertices >= 3) && (vrHiddenMask == nullptr) && !vrHiddenMaskFailed) {
++                            vrHiddenMask = std::make_unique<VrHiddenMask>();
++                            if (!vrHiddenMask->setup(ext.device)) {
++                                vrHiddenMask.reset();
++                                vrHiddenMaskFailed = true;
++                            }
++                        }
++
++                        const RenderFramebufferStorage *maskStorage = framebufferRenderer->framebufferVector[framebufferIndex].renderTargetDrawCall.fbStorage;
++                        if ((maskVertices >= 3) && (vrHiddenMask != nullptr) && (maskStorage != nullptr) && (maskStorage->colorDepthWrite != nullptr)) {
++                            const RenderTextureBarrier maskBarriers[] = {
++                                RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE),
++                                RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::DEPTH_WRITE)
++                            };
++                            ext.workloadGraphicsWorker->commandList->barriers(RenderBarrierStage::GRAPHICS, maskBarriers, uint32_t(std::size(maskBarriers)));
++                            vrHiddenMask->record(ext.workloadGraphicsWorker->commandList.get(), uint32_t(vrEye), maskXY, maskVertices, maskStorage->colorDepthWrite.get(),
++                                colorTarget->width, colorTarget->height);
++                        }
++                    }
++                    // Only the main eye raster; framebuffer operations and the HUD entries
++                    // below keep ordinary framebuffers even when they share this submission.
++                    const bool foveateEye = vrHost && vrEye >= 0 && (fbPair.colorImage.address == vrInfo.mainColorAddress);
++                    framebufferRenderer->setVrFoveation(foveateEye ? vrHost : nullptr, vrEye);
++#               endif
+                     framebufferRenderer->recordFramebuffer(ext.workloadGraphicsWorker, framebufferIndex++);
++#if RT64_VR
++                    framebufferRenderer->setVrFoveation(nullptr, -1);
++#endif
++#               if RT64_VR
++                    // The HUD entries added after this pair: from plain black and white images.
++                    if (vrHudInPass() && (fbPair.colorImage.address == vrInfo.mainColorAddress) && (colorTarget != nullptr)) {
++                        for (uint32_t h = 0; h < 2; h++) {
++                            RenderTarget *hudTarget = vrHudTarget[h].get();
++                            if (!vrHudCleared && (h == 0)) {
++                                vrHudDepthTarget->clearDepthTarget(ext.workloadGraphicsWorker);
++                            }
++
++                            if (!vrHudCleared) {
++                                const float v = (h == 1) ? 1.0f : 0.0f;
++                                hudTarget->setupColorFramebuffer(ext.workloadGraphicsWorker);
++                                ext.workloadGraphicsWorker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(hudTarget->texture.get(), RenderTextureLayout::COLOR_WRITE));
++                                ext.workloadGraphicsWorker->commandList->setFramebuffer(hudTarget->textureFramebuffer.get());
++                                ext.workloadGraphicsWorker->commandList->clearColor(0, RenderColor(v, v, v, 1.0f));
++                            }
++
++                            framebufferRenderer->recordFramebuffer(ext.workloadGraphicsWorker, framebufferIndex++);
++                        }
++
++                        vrHudCleared = true;
++                    }
++#               endif
+ 
+                     // Transition the render targets in case the present queue will show them so it doesn't have to perform transitions.
+                     if (colorTarget != nullptr && depthTarget != nullptr) {
+@@ -838,9 +1046,70 @@ namespace RT64 {
+             }
+ 
+             ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 1);
++#       if RT64_VR
++            VrPassMark(ext.workloadGraphicsWorker->commandList.get(), 0x400);
++            // Eye pass: copy the finished main color image to the eye's output in this submission.
++            if ((vrHost != nullptr) && (vrEye >= 0) && !overrideTargetKey.isEmpty()) {
++                RenderTarget &eyeTarget = targetManager.get(overrideTargetKey);
++                if (eyeTarget.texture != nullptr) {
++                    // A draw into the host's image where it offers one (RT64_VR_EYE_COPY=transfer
++                    // keeps the transfer copy, for comparisons).
++                    static const bool transferCopy = (getenv("RT64_VR_EYE_COPY") != nullptr) && (strcmp(getenv("RT64_VR_EYE_COPY"), "transfer") == 0);
++                    if (!transferCopy && (vrEyeCopier == nullptr) && !vrEyeCopierFailed) {
++                        vrEyeCopier = std::make_unique<VrEyeCopier>();
++                        if (!vrEyeCopier->setup(ext.device)) {
++                            vrEyeCopier.reset();
++                            vrEyeCopierFailed = true;
++                        }
++                    }
++
++                    uint32_t eyeFbWidth = 0, eyeFbHeight = 0;
++                    RenderFramebuffer *eyeFramebuffer = (vrEyeCopier != nullptr) ? vrHost->eyeFramebuffer(uint32_t(vrEye), &eyeFbWidth, &eyeFbHeight) : nullptr;
++                    if (eyeFramebuffer != nullptr) {
++                        vrEyeCopier->record(ext.workloadGraphicsWorker->commandList.get(), uint32_t(vrEye), eyeTarget.texture.get(), eyeFramebuffer,
++                            std::min(eyeFbWidth, vrFrame.eyeWidth), std::min(eyeFbHeight, vrFrame.eyeHeight));
++                    }
++
++                    vrHost->recordEye(uint32_t(vrEye), ext.workloadGraphicsWorker->commandList.get(), eyeTarget.texture.get(), vrFrame.eyeWidth, vrFrame.eyeHeight, eyeFramebuffer != nullptr);
++                }
++            }
++
++            // HUD: after the white pass, solve both renders into the host's HUD image.
++            if (vrHudInPass() && vrHudCleared && (vrHudTarget[0]->texture != nullptr) && (vrHudTarget[1]->texture != nullptr)) {
++                RenderTexture *black = vrHudTarget[0]->texture.get();
++                RenderTexture *white = vrHudTarget[1]->texture.get();
++                const RenderTextureBarrier reads[] = {
++                    RenderTextureBarrier(black, RenderTextureLayout::SHADER_READ),
++                    RenderTextureBarrier(white, RenderTextureLayout::SHADER_READ)
++                };
++                ext.workloadGraphicsWorker->commandList->barriers(RenderBarrierStage::GRAPHICS, reads, uint32_t(std::size(reads)));
++                vrHudSolver->record(ext.workloadGraphicsWorker->commandList.get(), black, white, std::min(vrFrame.eyeWidth, vrHudTarget[0]->width), std::min(vrFrame.eyeHeight, vrHudTarget[0]->height),
++                    vrHudFramebuffer, vrHudWidth, vrHudHeight);
++            }
++            VrPassMark(ext.workloadGraphicsWorker->commandList.get(), 0x500);
++            ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 2);
++            if (passMarks.pool != nullptr) {
++                // Every query must be written for the pool's results to be read.
++                for (uint32_t m = passMarks.count; m < passMarks.capacity; m++) {
++                    ext.workloadGraphicsWorker->commandList->writeTimestamp(passMarks.pool, m);
++                }
++            }
++
++            passMarks.pool = nullptr;
++#       endif
+             ext.workloadGraphicsWorker->commandList->end();
+             framebufferRenderer->waitForUploaders();
++#       if RT64_VR
++            vrLastEyeStats.recordMs = vrRecordTimer.elapsedMicroseconds() / 1000.0;
++#       endif
++#       if RT64_VR
++            ElapsedTimer vrSubmitTimer;
++#       endif
+             ext.workloadGraphicsWorker->execute();
++#       if RT64_VR
++            vrLastEyeStats.submitMs = vrSubmitTimer.elapsedMicroseconds() / 1000.0;
++#       endif
++#       if !RT64_VR
+             ext.workloadGraphicsWorker->wait();
+             workerMutex.unlock();
+ 
+@@ -861,9 +1130,83 @@ namespace RT64 {
+         rendererCPUProfiler.end();
+         rendererCPUProfiler.log();
+         rendererCPUProfiler.reset();
++#       else
++            // The last eye pass of a display frame isn't waited for here: the host ends the frame
++            // while the GPU works, and the next frame finishes it after xrWaitFrame.
++            workerMutex.unlock();
++            vrPendingPassTimes = passTimes;
++            vrPendingFinish = true;
++            if (!vrDeferSubmission) {
++                threadVrFinishSubmission();
++            }
++        }
++
++        if ((overrideTarget != nullptr) && !usingMSAA) {
++            targetManager.removeOverride(overrideTargetKey);
++        }
++
++        framebufferRenderer->advanceFrame(workloadConfig.raytracingEnabled);
++        rendererCPUProfiler.end();
++        rendererCPUProfiler.log();
++        rendererCPUProfiler.reset();
++#       endif
+ #   endif
+     }
+ 
++#if RT64_VR
++    void WorkloadQueue::threadVrFinishSubmission() {
++        if (!vrPendingFinish) {
++            return;
++        }
++
++        vrPendingFinish = false;
++        {
++            ElapsedTimer waitTimer;
++            std::scoped_lock<std::mutex> lock(workerMutex);
++            ext.workloadGraphicsWorker->wait();
++            vrLastEyeStats.waitMs = waitTimer.elapsedMicroseconds() / 1000.0;
++        }
++
++        {
++            const bool passTimes = vrPendingPassTimes;
++            VrPassMarks &passMarks = GetVrPassMarks();
++            queryPool->queryResults();
++            const uint64_t *frameTimestamps = queryPool->getResults();
++            rendererGPUProfiler.log(double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0);
++            vrLastEyeStats.gpuMs = double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0;
++            vrLastEyeStats.gpuCopyMs = double(frameTimestamps[2] - frameTimestamps[1]) / 1000000.0;
++            if (passTimes && (passMarks.count > 1)) {
++                vrPassMarkPool->queryResults();
++                const uint64_t *marks = vrPassMarkPool->getResults();
++                std::string line;
++                char item[64];
++                for (uint32_t m = 1; m < passMarks.count; m++) {
++                    const uint32_t label = passMarks.labels[m - 1];
++                    const char *kind = (label >> 8) == 0 ? "setup" : (label >> 8) == 1 ? "dread" : (label >> 8) == 2 ? "dwrite" : (label >> 8) == 3 ? "fb" : (label >> 8) == 4 ? "copy" : "?";
++                    snprintf(item, sizeof(item), " %s%u=%.2f", kind, ((label >> 8) == 3) ? (label & 0xFF) : 0u, double(marks[m] - marks[m - 1]) / 1000000.0);
++                    line += item;
++                }
++                fprintf(stdout, "[vr-pass] %u marks:%s\n", passMarks.count, line.c_str());
++                fflush(stdout);
++            }
++
++            // Indicate to the texture cache it's safe to delete the textures if no locks are active.
++            ext.textureCache->decrementLock();
++        }
++
++        // A deferred eye pass reports to the host now.
++        if (vrPendingEye >= 0) {
++            VrEyeStats stats = vrPendingStats;
++            stats.gpuMs = vrLastEyeStats.gpuMs;
++            stats.gpuCopyMs = vrLastEyeStats.gpuCopyMs;
++            stats.waitMs = vrLastEyeStats.waitMs;
++            const uint32_t eye = uint32_t(vrPendingEye);
++            vrPendingEye = -1;
++            vrHost->eyeDone(eye, stats);
++        }
++    }
++#endif
++
+     void WorkloadQueue::threadAdvanceBarrier() {
+         std::scoped_lock<std::mutex> cursorLock(cursorMutex);
+         barrierCursor = (barrierCursor + 1) % workloads.size();
+@@ -1176,6 +1519,653 @@ namespace RT64 {
+         }
+     }
+     
++#if RT64_VR
++    void WorkloadQueue::threadDetectInterpolationTarget(const Workload &workload, RenderTargetKey &interpolationTargetKey, int32_t &interpolationTargetFbPairIndex) {
++        // The same detection as renderThreadLoop: the newest color image the present queue showed
++        // early, which is the frame's main color image.
++        std::scoped_lock<std::mutex> managerLock(ext.sharedResources->managerMutex);
++        FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
++        std::vector<uint32_t> &colorVector = ext.sharedResources->colorImageAddressVector;
++        std::unordered_set<uint32_t> &colorSet = ext.sharedResources->colorImageAddressSet;
++        colorVector.clear();
++        colorSet.clear();
++        for (int32_t f = workload.fbPairCount - 1; f >= 0; f--) {
++            const FramebufferPair &fbPair = workload.fbPairs[f];
++            bool interpolationCandidate = fbPair.earlyPresentCandidate();
++            if (fbPair.drawColorRect.isEmpty()) {
++                continue;
++            }
++
++            const auto &colorImg = fbPair.colorImage;
++            if (colorSet.find(colorImg.address) != colorSet.end()) {
++                continue;
++            }
++            else {
++                if (interpolationCandidate) {
++                    colorVector.push_back(colorImg.address);
++                }
++
++                colorSet.insert(colorImg.address);
++            }
++
++            if (!interpolationCandidate || !interpolationTargetKey.isEmpty()) {
++                continue;
++            }
++
++            Framebuffer *interpolationFb = fbManager.find(colorImg.address);
++            if ((interpolationFb != nullptr) && interpolationFb->interpolationEnabled) {
++                interpolationTargetKey.fbType = Framebuffer::Type::Color;
++                interpolationTargetKey.address = fbPair.colorImage.address;
++                interpolationTargetKey.siz = fbPair.colorImage.siz;
++                interpolationTargetKey.width = fbPair.colorImage.width;
++                interpolationTargetFbPairIndex = f;
++            }
++        }
++    }
++
++    void WorkloadQueue::threadVrClassifyCamera(const Workload &workload, uint32_t mainColorAddress) {
++        // The game camera: perspective projections drawn into the main color image that carry the
++        // camera's matrix group, or, when none does, every perspective projection drawn there.
++        uint32_t groups[2] = {};
++        vrHost->cameraGroups(groups[0], groups[1]);
++        const uint32_t anyGroup[2] = {};
++        uint32_t inGroup = 0;
++        uint32_t anyPerspective = 0;
++        for (uint32_t f = 0; f < workload.fbPairCount; f++) {
++            const FramebufferPair &fbPair = workload.fbPairs[f];
++            for (uint32_t p = 0; p < fbPair.projectionCount; p++) {
++                const Projection &proj = fbPair.projections[p];
++                if (proj.scissorRect.isNull()) {
++                    continue;
++                }
++
++                if (ProjectionProcessor::isVrCamera(workload, fbPair, proj, mainColorAddress, groups)) {
++                    inGroup++;
++                }
++                else if (ProjectionProcessor::isVrCamera(workload, fbPair, proj, mainColorAddress, anyGroup)) {
++                    anyPerspective++;
++                }
++            }
++        }
++
++        vrInfo.mainColorAddress = mainColorAddress;
++        vrInfo.cameraFromGroup = (inGroup > 0);
++        vrInfo.cameraProjections = (inGroup > 0) ? inGroup : anyPerspective;
++
++        // The camera's own view this frame (uninterpolated): the first projection of the primary
++        // group, else of the secondary group, else the first perspective one.
++        vrInfo.cameraViewValid = false;
++        const uint32_t primaryOnly[2] = { groups[0], 0 };
++        const uint32_t secondaryOnly[2] = { groups[1], 0 };
++        const uint32_t *searchGroups[3] = { primaryOnly, secondaryOnly, anyGroup };
++        for (uint32_t s = 0; (s < 3) && !vrInfo.cameraViewValid; s++) {
++            if ((s < 2) && (searchGroups[s][0] == 0)) {
++                continue;
++            }
++
++            for (uint32_t f = 0; (f < workload.fbPairCount) && !vrInfo.cameraViewValid; f++) {
++                const FramebufferPair &fbPair = workload.fbPairs[f];
++                for (uint32_t p = 0; p < fbPair.projectionCount; p++) {
++                    const Projection &proj = fbPair.projections[p];
++                    if (proj.scissorRect.isNull() || (proj.transformsIndex >= workload.drawData.viewTransforms.size()) ||
++                        !ProjectionProcessor::isVrCamera(workload, fbPair, proj, mainColorAddress, searchGroups[s]))
++                    {
++                        continue;
++                    }
++
++                    const interop::float4x4 &view = workload.drawData.viewTransforms[proj.transformsIndex];
++                    for (int r = 0; r < 4; r++) {
++                        for (int c = 0; c < 4; c++) {
++                            vrInfo.cameraView[r * 4 + c] = view[r][c];
++                        }
++                    }
++
++                    vrInfo.cameraViewValid = true;
++                    break;
++                }
++            }
++        }
++        threadVrClassifyCalls(workload, mainColorAddress, vrInfo.cameraFromGroup ? groups : anyGroup);
++
++        // Diagnostics: the height of the model around a point (the player), for settling the world
++        // scale. Vertices count when they and their model matrix's origin are near the point.
++        float center[3];
++        float radius = 0.0f;
++        if ((vrInfo.cameraProjections > 0) && vrHost->wantPlayerExtent(center, radius)) {
++            std::vector<bool> cameraTransforms(workload.drawData.viewProjTransforms.size(), false);
++            const uint32_t *useGroups = vrInfo.cameraFromGroup ? groups : anyGroup;
++            for (uint32_t f = 0; f < workload.fbPairCount; f++) {
++                const FramebufferPair &fbPair = workload.fbPairs[f];
++                for (uint32_t p = 0; p < fbPair.projectionCount; p++) {
++                    const Projection &proj = fbPair.projections[p];
++                    if (ProjectionProcessor::isVrCamera(workload, fbPair, proj, mainColorAddress, useGroups) && (proj.transformsIndex < cameraTransforms.size())) {
++                        cameraTransforms[proj.transformsIndex] = true;
++                    }
++                }
++            }
++
++            const DrawData &drawData = workload.drawData;
++            const size_t vertexCount = std::min({ drawData.posFloats.size() / 3, drawData.viewProjIndices.size(), drawData.worldIndices.size() });
++            float minY = 1e30f, maxY = -1e30f;
++            uint32_t counted = 0;
++            const float radiusSq = radius * radius;
++            for (size_t v = 0; v < vertexCount; v++) {
++                const uint16_t viewProjIndex = drawData.viewProjIndices[v];
++                const uint16_t worldIndex = drawData.worldIndices[v];
++                if ((viewProjIndex >= cameraTransforms.size()) || !cameraTransforms[viewProjIndex] || (worldIndex >= drawData.worldTransforms.size())) {
++                    continue;
++                }
++
++                const interop::float4x4 &world = drawData.worldTransforms[worldIndex];
++                const float ox = world[3][0] - center[0], oz = world[3][2] - center[2];
++                if ((ox * ox + oz * oz) > radiusSq) {
++                    continue;
++                }
++
++                const float x = drawData.posFloats[v * 3 + 0], y = drawData.posFloats[v * 3 + 1], z = drawData.posFloats[v * 3 + 2];
++                const float wx = x * world[0][0] + y * world[1][0] + z * world[2][0] + world[3][0];
++                const float wy = x * world[0][1] + y * world[1][1] + z * world[2][1] + world[3][1];
++                const float wz = x * world[0][2] + y * world[1][2] + z * world[2][2] + world[3][2];
++                const float dx = wx - center[0], dz = wz - center[2];
++                if ((dx * dx + dz * dz) > radiusSq) {
++                    continue;
++                }
++
++                minY = std::min(minY, wy);
++                maxY = std::max(maxY, wy);
++                counted++;
++            }
++
++            vrHost->playerExtent(minY, maxY, counted);
++        }
++    }
++
++    void WorkloadQueue::threadVrClassifyCalls(const Workload &workload, uint32_t mainColorAddress, const uint32_t cameraGroups[2]) {
++        // Where each game call goes in VR. In the main color image, everything up to and
++        // including the game camera stays in the eye passes (clears, backgrounds, the world), and
++        // so do perspective draws after it. 2D draws after the camera are the HUD (sprites,
++        // counters, text, the first person crosshair), except those that cover the frame
++        // (underwater tint, fades, pause darkening) or are letterbox bars, which stay in the eyes.
++        // Other framebuffers (offscreen effects) are drawn by the eye passes only.
++        vrCallClass.assign(workload.gameCallCount, uint8_t(VrCallOffscreen));
++        // Diagnostics: RT64_VR_LOG_HUD=1 lists the HUD's calls every 300th game frame.
++        // RT64_VR_LOG_HUD=<period in game frames> (1 means the default, 300).
++        static const uint64_t logHudPeriod = (getenv("RT64_VR_LOG_HUD") != nullptr) ? std::max<uint64_t>(1, strtoull(getenv("RT64_VR_LOG_HUD"), nullptr, 10)) : 0;
++        vrLogHudCalls = (logHudPeriod > 0) && ((++vrClassifyCount % ((logHudPeriod == 1) ? 300 : logHudPeriod)) == 0);
++        vrInfo.hudCalls = 0;
++        // FNV-1a per part (call state, colours, textures, positions, texcoords, vertex colours,
++        // world matrices), so a diagnostic can tell which part changed.
++        uint64_t parts[7];
++        for (uint64_t &part : parts) {
++            part = 1469598103934665603ULL;
++        }
++
++        int partIndex = 0;
++        auto hashBytes = [&parts, &partIndex](const void *data, size_t size) {
++            const uint8_t *bytes = static_cast<const uint8_t *>(data);
++            uint64_t &h = parts[partIndex];
++            for (size_t i = 0; i < size; i++) {
++                h = (h ^ bytes[i]) * 1099511628211ULL;
++            }
++        };
++        vrInfo.cameraTop = 0.0f;
++        vrInfo.cameraBottom = 1.0f;
++        vrInfo.viewportTop = 0.0f;
++        vrInfo.viewportBottom = 1.0f;
++        const DrawData &drawData = workload.drawData;
++        const float frameHeight = (workload.viFbSize[1] > 0) ? float(workload.viFbSize[1]) : 240.0f;
++        bool seenCamera = false;
++        // Only when the camera is known by its group: otherwise every perspective projection is
++        // taken as the camera.
++        const bool perspectiveHudAllowed = (vrHost != nullptr) && vrHost->perspectiveHudAfterCamera() && (cameraGroups[0] != 0);
++        for (uint32_t f = 0; f < workload.fbPairCount; f++) {
++            const FramebufferPair &fbPair = workload.fbPairs[f];
++            const bool mainImage = (mainColorAddress != 0) && (fbPair.colorImage.address == mainColorAddress);
++            const float frameWidth = (fbPair.colorImage.width > 0) ? float(fbPair.colorImage.width) : 320.0f;
++            for (uint32_t p = 0; p < fbPair.projectionCount; p++) {
++                const Projection &proj = fbPair.projections[p];
++                const bool camera = mainImage && ProjectionProcessor::isVrCamera(workload, fbPair, proj, mainColorAddress, cameraGroups);
++                if (camera && !seenCamera && !proj.scissorRect.isNull()) {
++                    vrInfo.cameraTop = std::clamp(float(proj.scissorRect.top(false)) / frameHeight, 0.0f, 1.0f);
++                    vrInfo.cameraBottom = std::clamp(float(proj.scissorRect.bottom(false)) / frameHeight, 0.0f, 1.0f);
++                    if (proj.transformsIndex < workload.drawData.rspViewports.size()) {
++                        // The viewport itself (unit ratios), not its clipping guard band.
++                        const int16_t unitRatios[4] = { -1, -1, 1, 1 };
++                        const FixedRect viewport = workload.drawData.rspViewports[proj.transformsIndex].rect(unitRatios);
++                        if (!viewport.isNull() && (viewport.lry > viewport.uly)) {
++                            vrInfo.viewportTop = float(viewport.top(false)) / frameHeight;
++                            vrInfo.viewportBottom = float(viewport.bottom(false)) / frameHeight;
++                        }
++                    }
++                }
++
++                seenCamera = seenCamera || camera;
++                for (uint32_t d = 0; d < proj.gameCallCount; d++) {
++                    const GameCall &call = proj.gameCalls[d];
++                    const uint32_t callIndex = call.callDesc.callIndex;
++                    if (callIndex >= vrCallClass.size()) {
++                        continue;
++                    }
++
++                    if (!mainImage) {
++                        continue;
++                    }
++
++                    const bool perspectiveHud = perspectiveHudAllowed && !camera && (proj.type == Projection::Type::Perspective);
++                    if (!seenCamera || ((proj.type == Projection::Type::Perspective) && !perspectiveHud) || (call.callDesc.extendedType != DrawExtendedType::None)) {
++                        vrCallClass[callIndex] = VrCallEye;
++                        continue;
++                    }
++
++                    // The call's extent in the frame (0..1, y down), when it can be found.
++                    float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
++                    bool known = false;
++                    if ((proj.type == Projection::Type::Rectangle) || (call.callDesc.otherMode.cycleType() == G_CYC_FILL)) {
++                        const FixedRect &r = call.callDesc.rect;
++                        x0 = float(r.left(false)) / frameWidth;
++                        x1 = float(r.right(false)) / frameWidth;
++                        y0 = float(r.top(false)) / frameHeight;
++                        y1 = float(r.bottom(false)) / frameHeight;
++                        known = true;
++                    }
++                    else if (proj.type == Projection::Type::Orthographic) {
++                        float minX = 1e30f, minY = 1e30f, maxX = -1e30f, maxY = -1e30f;
++                        const uint32_t start = call.meshDesc.faceIndicesStart;
++                        const uint32_t end = std::min(start + call.callDesc.triangleCount * 3, uint32_t(drawData.faceIndices.size()));
++                        for (uint32_t i = start; i < end; i++) {
++                            const uint32_t v = drawData.faceIndices[i];
++                            if ((v * 3 + 2 >= drawData.posFloats.size()) || (v >= drawData.worldIndices.size()) || (v >= drawData.viewProjIndices.size())) {
++                                continue;
++                            }
++
++                            const uint16_t wi = drawData.worldIndices[v], vpi = drawData.viewProjIndices[v];
++                            if ((wi >= drawData.worldTransforms.size()) || (vpi >= drawData.viewProjTransforms.size())) {
++                                continue;
++                            }
++
++                            const interop::float4x4 &world = drawData.worldTransforms[wi];
++                            const interop::float4x4 &vp = drawData.viewProjTransforms[vpi];
++                            const float px = drawData.posFloats[v * 3 + 0], py = drawData.posFloats[v * 3 + 1], pz = drawData.posFloats[v * 3 + 2];
++                            float w4[4], c4[4];
++                            for (int k = 0; k < 4; k++) {
++                                w4[k] = px * world[0][k] + py * world[1][k] + pz * world[2][k] + world[3][k];
++                            }
++
++                            for (int k = 0; k < 4; k++) {
++                                c4[k] = w4[0] * vp[0][k] + w4[1] * vp[1][k] + w4[2] * vp[2][k] + w4[3] * vp[3][k];
++                            }
++
++                            if (std::fabs(c4[3]) < 1e-6f) {
++                                continue;
++                            }
++
++                            const float nx = c4[0] / c4[3], ny = c4[1] / c4[3];
++                            minX = std::min(minX, nx);
++                            maxX = std::max(maxX, nx);
++                            minY = std::min(minY, ny);
++                            maxY = std::max(maxY, ny);
++                            known = true;
++                        }
++
++                        x0 = (minX + 1.0f) * 0.5f;
++                        x1 = (maxX + 1.0f) * 0.5f;
++                        y0 = (1.0f - maxY) * 0.5f;
++                        y1 = (1.0f - minY) * 0.5f;
++                    }
++
++                    const bool fullWidth = known && (x0 <= 0.03f) && (x1 >= 0.97f);
++                    const bool fullFrame = fullWidth && (y0 <= 0.03f) && (y1 >= 0.97f);
++                    const bool bar = fullWidth && ((y1 - y0) < 0.35f) && ((y0 <= 0.03f) || (y1 >= 0.97f));
++                    if (fullFrame || bar) {
++                        vrCallClass[callIndex] = VrCallEye;
++                    }
++                    else {
++                        vrCallClass[callIndex] = VrCallHud;
++                        vrInfo.hudCalls++;
++                        if (vrLogHudCalls) {
++                            printf("[vr] hud call %u: %s%s, extent %.3f %.3f - %.3f %.3f%s, %u triangles, combiner %08X %08X, othermode %08X %08X\n", callIndex,
++                                (proj.type == Projection::Type::Rectangle) ? "rect" : ((proj.type == Projection::Type::Orthographic) ? "ortho" : "other"),
++                                (call.callDesc.otherMode.cycleType() == G_CYC_FILL) ? " fill" : "", x0, y0, x1, y1, known ? "" : " (unknown)", call.callDesc.triangleCount,
++                                call.callDesc.colorCombiner.L, call.callDesc.colorCombiner.H, call.callDesc.otherMode.L, call.callDesc.otherMode.H);
++                            printf("[vr] hud call %u: rect %.2f %.2f - %.2f %.2f origins %u/%u aspect %u, scissor %.2f %.2f - %.2f %.2f origins %u/%u\n", callIndex,
++                                call.callDesc.rect.ulx / 4.0f, call.callDesc.rect.uly / 4.0f, call.callDesc.rect.lrx / 4.0f, call.callDesc.rect.lry / 4.0f,
++                                call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin, call.callDesc.rectAspect,
++                                call.callDesc.scissorRect.ulx / 4.0f, call.callDesc.scissorRect.uly / 4.0f, call.callDesc.scissorRect.lrx / 4.0f, call.callDesc.scissorRect.lry / 4.0f,
++                                call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
++                        }
++
++                        // The signature: the call's state, its textures and its vertices.
++                        const DrawCall &desc = call.callDesc;
++                        partIndex = 0;
++                        hashBytes(&desc.triangleCount, sizeof(desc.triangleCount));
++                        hashBytes(&desc.rect, sizeof(desc.rect));
++                        hashBytes(&desc.fillColor, sizeof(desc.fillColor));
++                        hashBytes(&desc.otherMode, sizeof(desc.otherMode));
++                        hashBytes(&desc.colorCombiner, sizeof(desc.colorCombiner));
++                        partIndex = 1;
++                        hashBytes(&desc.rdpParams, sizeof(desc.rdpParams));
++                        partIndex = 2;
++
++                        for (uint32_t t = 0; t < desc.tileCount; t++) {
++                            if (desc.tileIndex + t < drawData.callTiles.size()) {
++                                const DrawCallTile &tile = drawData.callTiles[desc.tileIndex + t];
++                                hashBytes(&tile.tmemHashOrID, sizeof(tile.tmemHashOrID));
++                                hashBytes(&tile.minTexcoord, sizeof(tile.minTexcoord));
++                                hashBytes(&tile.maxTexcoord, sizeof(tile.maxTexcoord));
++                            }
++                        }
++
++                        if ((proj.type == Projection::Type::Orthographic) || perspectiveHud) {
++                            const uint32_t start = call.meshDesc.faceIndicesStart;
++                            const uint32_t end = std::min(start + desc.triangleCount * 3, uint32_t(drawData.faceIndices.size()));
++                            for (uint32_t i = start; i < end; i++) {
++                                const uint32_t v = drawData.faceIndices[i];
++                                partIndex = 3;
++                                if (v * 3 + 2 < drawData.posFloats.size()) {
++                                    hashBytes(&drawData.posFloats[v * 3], sizeof(float) * 3);
++                                }
++
++                                partIndex = 4;
++                                if (v * 2 + 1 < drawData.tcFloats.size()) {
++                                    hashBytes(&drawData.tcFloats[v * 2], sizeof(float) * 2);
++                                }
++
++                                partIndex = 5;
++                                if (v * 4 + 3 < drawData.normColBytes.size()) {
++                                    hashBytes(&drawData.normColBytes[v * 4], 4);
++                                }
++
++                                partIndex = 6;
++                                if ((v < drawData.worldIndices.size()) && (drawData.worldIndices[v] < drawData.worldTransforms.size())) {
++                                    hashBytes(&drawData.worldTransforms[drawData.worldIndices[v]], sizeof(interop::float4x4));
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++
++        uint64_t signature = 1469598103934665603ULL;
++        vrInfo.hudChangedParts = 0;
++        for (int i = 0; i < 7; i++) {
++            signature = (signature ^ parts[i]) * 1099511628211ULL;
++            if (parts[i] != vrHudParts[i]) {
++                vrInfo.hudChangedParts |= (1U << i);
++            }
++
++            vrHudParts[i] = parts[i];
++        }
++
++        vrInfo.hudSignature = signature;
++        if (vrLogHudCalls) {
++            vrLogHudCalls = false;
++            fflush(stdout);
++        }
++    }
++
++    void WorkloadQueue::renderThreadLoopVR() {
++        Thread::setCurrentThreadName("RT64 Workload VR");
++
++        // The host's display frames pace this loop. Each frame takes at most one new workload
++        // without blocking and consumes it once (configuration, game frame advance, matching);
++        // the eye passes then replay the held pair of game frames once per eye at the weight the
++        // host's display-time scheduler gives. Without eye passes, each new workload is rendered
++        // once, flat, as RT64 would at the original rate.
++        WorkloadConfiguration workloadConfig;
++        int heldCursor = -1;
++        RenderTargetKey interpolationTargetKey;
++        int32_t interpolationTargetFbPairIndex = -1;
++        bool velocityUploaderUsed = false;
++        bool tileInterpolationUsed = false;
++        bool lookAtInterpolationUsed = false;
++        float deltaTimeMs = 1.0f / 30.0f;
++        VrFrame::Mode configuredMode = VrFrame::Mode::None;
++        uint32_t configuredEyeWidth = 0;
++        uint32_t configuredFlatHeight = 0;
++        while (threadsRunning) {
++            vrFrame = vrHost->beginFrame();
++            threadVrFinishSubmission();
++            const bool displayFrame = (vrFrame.mode != VrFrame::Mode::None);
++
++            // Take the next workload if it is complete and its present event has been processed.
++            int cursor = -1;
++            {
++                const std::scoped_lock lock(cursorMutex);
++                if (writeCursor != threadCursor) {
++                    cursor = threadCursor;
++                }
++            }
++
++            if (cursor >= 0) {
++                uint64_t presentQueueId;
++                {
++                    const std::scoped_lock lock(ext.presentQueue->presentIdMutex);
++                    presentQueueId = ext.presentQueue->presentId;
++                }
++
++                if (workloads[cursor].presentId > presentQueueId) {
++                    cursor = -1;
++                }
++                else {
++                    const std::scoped_lock lock(cursorMutex);
++                    threadCursor = (threadCursor + 1) % workloads.size();
++                }
++            }
++
++            if (!threadsRunning) {
++                if (displayFrame) {
++                    vrHost->endFrame();
++                }
++
++                break;
++            }
++
++            if (!displayFrame && (cursor < 0)) {
++                std::unique_lock<std::mutex> cursorLock(cursorMutex);
++                cursorCondition.wait_for(cursorLock, std::chrono::milliseconds(2));
++                continue;
++            }
++
++            {
++                std::unique_lock<std::mutex> threadLock(threadMutex);
++                workloadProfiler.start();
++                const bool modeChanged = (vrFrame.mode != configuredMode) || (vrFrame.eyeWidth != configuredEyeWidth) || (vrFrame.flatHeight != configuredFlatHeight);
++                const int configCursor = (cursor >= 0) ? cursor : heldCursor;
++                if ((configCursor >= 0) && ((cursor >= 0) || modeChanged)) {
++                    threadConfigurationUpdate(workloads[configCursor].viFbSize, workloadConfig);
++                    configuredMode = vrFrame.mode;
++                    configuredEyeWidth = vrFrame.eyeWidth;
++                    configuredFlatHeight = vrFrame.flatHeight;
++                }
++
++                const bool newWorkload = (cursor >= 0);
++                if (newWorkload) {
++                    Workload &workload = workloads[cursor];
++                    prevFrameIndex = curFrameIndex;
++                    curFrameIndex = (curFrameIndex + 1) % gameFrames.size();
++                    GameFrame &curFrame = gameFrames[curFrameIndex];
++                    const GameFrame &prevFrame = gameFrames[prevFrameIndex];
++                    uint32_t workloadIndex = cursor;
++                    curFrame.set(*this, &workloadIndex, 1);
++
++                    interpolationTargetKey = RenderTargetKey();
++                    interpolationTargetFbPairIndex = -1;
++                    threadDetectInterpolationTarget(workload, interpolationTargetKey, interpolationTargetFbPairIndex);
++
++                    // Matching always runs: every display frame interpolates.
++                    velocityUploaderUsed = false;
++                    tileInterpolationUsed = false;
++                    lookAtInterpolationUsed = false;
++                    matchingProfiler.reset();
++                    matchingProfiler.start();
++                    curFrame.match(ext.workloadGraphicsWorker, *this, prevFrame, ext.workloadVelocityUploader, velocityUploaderUsed, tileInterpolationUsed, lookAtInterpolationUsed);
++                    matchingProfiler.end();
++                    matchingProfiler.log();
++
++                    deltaTimeMs = (workload.viOriginalRate > 0) ? (1.0f / float(workload.viOriginalRate)) : (1.0f / 30.0f);
++                    ext.sharedResources->viOriginalRate = workload.viOriginalRate;
++
++                    // The present queue's frame counters, as for a workload with one display frame.
++                    const bool useDifferentCounters = (lastPresentId != workload.presentId);
++                    if (useDifferentCounters) {
++                        ext.sharedResources->interpolatedFramesIndex = ext.sharedResources->interpolatedFramesIndex ^ 1;
++                        lastPresentId = workload.presentId;
++                    }
++
++                    {
++                        std::scoped_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
++                        InterpolatedFrameCounters &curFrameCounters = ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
++                        curFrameCounters.skipped = false;
++                        curFrameCounters.presented = 0;
++                        curFrameCounters.available = 0;
++                        curFrameCounters.count = 1;
++                    }
++
++                    vrInfo = VrWorkloadInfo();
++                    vrInfo.viOriginalRate = workload.viOriginalRate;
++                    vrInfo.viWidth = workload.viFbSize[0];
++                    vrInfo.viHeight = workload.viFbSize[1];
++                    threadVrClassifyCamera(workload, interpolationTargetKey.isEmpty() ? 0 : interpolationTargetKey.address);
++                    vrHost->workloadArrived(vrInfo);
++                    heldCursor = cursor;
++                }
++
++                if (heldCursor >= 0) {
++                    Workload &workload = workloads[heldCursor];
++                    GameFrame &curFrame = gameFrames[curFrameIndex];
++                    const GameFrame &prevFrame = gameFrames[prevFrameIndex];
++                    const bool stereo = (vrFrame.mode == VrFrame::Mode::Stereo) && !interpolationTargetKey.isEmpty() && (vrFrame.eyeWidth > 0);
++                    if (stereo) {
++                        float curFrameWeight = 1.0f;
++                        float prevFrameWeight = 0.0f;
++                        vrHost->frameWeights(curFrameWeight, prevFrameWeight);
++                        if (vrRightEyeTarget == nullptr) {
++                            vrRightEyeTarget = std::make_unique<RenderTarget>(interpolationTargetKey.address, Framebuffer::Type::Color, RenderMultisampling(), ext.sharedResources->renderTargetManager.usesHDR);
++                        }
++
++                        // The HUD, once per game frame: the left eye's pass also draws the HUD's 2D
++                        // calls into a black and a white image and solves them into the host's HUD
++                        // image (rt64_vr.h, hudAcquire).
++                        vrHudFramebuffer = nullptr;
++                        if (newWorkload) {
++                            RenderFramebuffer *hudFramebuffer = vrHost->hudAcquire(vrInfo.hudCalls, vrInfo.hudSignature, &vrHudWidth, &vrHudHeight);
++                            if ((hudFramebuffer != nullptr) && (vrHudSolver == nullptr) && !vrHudSolverFailed) {
++                                vrHudSolver = std::make_unique<VrHudSolver>();
++                                if (!vrHudSolver->setup(ext.device)) {
++                                    vrHudSolver.reset();
++                                    vrHudSolverFailed = true;
++                                }
++                            }
++
++                            if ((hudFramebuffer != nullptr) && (vrHudSolver != nullptr)) {
++                                for (uint32_t h = 0; h < 2; h++) {
++                                    if (vrHudTarget[h] == nullptr) {
++                                        vrHudTarget[h] = std::make_unique<RenderTarget>(interpolationTargetKey.address, Framebuffer::Type::Color, RenderMultisampling(), ext.sharedResources->renderTargetManager.usesHDR);
++                                    }
++                                }
++
++                                vrHudFramebuffer = hudFramebuffer;
++                            }
++                        }
++
++                        // The left eye renders into the main color image itself, so later frames that
++                        // read it (and the flat output) see a coherent image; the right eye into its
++                        // own target.
++                        // RT64_VR_EYE_ORDER=swap renders the right eye first (diagnostics).
++                        static const bool swapEyes = (getenv("RT64_VR_EYE_ORDER") != nullptr) && (strcmp(getenv("RT64_VR_EYE_ORDER"), "swap") == 0);
++                        for (uint32_t pass = 0; pass < 2; pass++) {
++                            const uint32_t eye = swapEyes ? (1 - pass) : pass;
++                            ElapsedTimer eyeTimer;
++                            vrEye = int32_t(eye);
++                            vrPass = VrPass::Eye;
++                            // RT64_VR_RIGHT_TARGET=main: the right eye also renders into the main color image (diagnostics).
++                            static const bool rightInMain = (getenv("RT64_VR_RIGHT_TARGET") != nullptr) && (strcmp(getenv("RT64_VR_RIGHT_TARGET"), "main") == 0);
++                            RenderTarget *overrideTarget = ((eye == 1) && !rightInMain) ? vrRightEyeTarget.get() : nullptr;
++                            const uint32_t overrideModifier = ((eye == 1) && !rightInMain) ? 0x7E1 : 0;
++                            vrLastEyeStats = VrEyeStats();
++                            GetVrDrawStats() = VrDrawStats();
++                            {
++                                static const bool logDraws = (getenv("RT64_VR_LOG_DRAWS") != nullptr);
++                                static uint64_t logDrawFrames = 0;
++                                GetVrDrawStats().logDraws = logDraws && (eye == 1) && (((logDrawFrames++) % 1800) == 900);
++                                if (GetVrDrawStats().logDraws) {
++                                    fprintf(stdout, "[vr-draw] right eye pass, %ux%u\n", vrFrame.eyeWidth, vrFrame.eyeHeight);
++                                }
++                            }
++                            plume::GetVulkanPassStats() = plume::VulkanPassStats();
++                            static const bool deferWait = (getenv("RT64_VR_DEFER_WAIT") == nullptr) || (getenv("RT64_VR_DEFER_WAIT")[0] != '0');
++                            vrDeferSubmission = deferWait && (pass == 1);
++                            threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
++                                interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, false, tileInterpolationUsed, lookAtInterpolationUsed);
++                            const bool deferred = vrDeferSubmission && vrPendingFinish;
++                            vrDeferSubmission = false;
++                            vrEye = -1;
++                            vrPass = VrPass::None;
++                            {
++                                VrEyeStats &st = vrLastEyeStats;
++                                const VrDrawStats &ds = GetVrDrawStats();
++                                const plume::VulkanPassStats &ps = plume::GetVulkanPassStats();
++                                st.cpuMs = eyeTimer.elapsedMicroseconds() / 1000.0;
++                                st.renderPasses = uint32_t(ps.begins);
++                                st.passMpx = double(ps.pixels) / 1e6;
++                                st.draws = ds.draws;
++                                st.uberDraws = ds.uberDraws;
++                                st.decalDraws = ds.decalDraws;
++                                st.depthSwitches = ds.depthReads + ds.depthWrites;
++                                st.testZ = ds.testZ;
++                                st.clears = ds.clears;
++                                if (deferred) {
++                                    vrPendingStats = st;
++                                    vrPendingEye = int32_t(eye);
++                                }
++                                else {
++                                    vrHost->eyeDone(eye, st);
++                                }
++                            }
++                            if ((eye == 0) && (vrHudFramebuffer != nullptr)) {
++                                vrHudFramebuffer = nullptr;
++                                vrHost->hudRecorded(0.0, 0.0);
++                            }
++                            if (newWorkload && (pass == 0)) {
++                                threadAdvanceWorkloadId(workload.workloadId);
++                            }
++                        }
++
++                    }
++                    else if (newWorkload) {
++                        threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, 1.0f, 0.0f, deltaTimeMs,
++                            interpolationTargetKey, interpolationTargetFbPairIndex, nullptr, 0, velocityUploaderUsed, false, tileInterpolationUsed, lookAtInterpolationUsed);
++                        threadAdvanceWorkloadId(workload.workloadId);
++                    }
++
++                    if (newWorkload) {
++                        threadConfigurationValidate();
++
++                        // Keep the previous game frame's workload (and this one) from being
++                        // overwritten while the pair is held.
++                        {
++                            std::scoped_lock<std::mutex> cursorLock(cursorMutex);
++                            barrierCursor = (heldCursor + int(workloads.size()) - 1) % int(workloads.size());
++                        }
++                    }
++                }
++
++                workloadProfiler.end();
++                workloadProfiler.log();
++                workloadProfiler.reset();
++            }
++
++            if (displayFrame) {
++                vrHost->endFrame();
++            }
++        }
++
++        threadVrFinishSubmission();
++        vrHost->threadExit();
++    }
++#endif
++
+     void WorkloadQueue::idleThreadLoop() {
+         // Beware traveler as you enter the zone of dirty driver hacks. Given N64 games are not exactly a demanding thing to render
+         // nowadays for modern GPUs and due to how the plugin's cooperative multiqueue system works, it's sometimes just not possible
+@@ -1221,4 +2211,4 @@ namespace RT64 {
+             }
+         }
+     }
+-};
+\ No newline at end of file
++};
+diff --git a/src/hle/rt64_workload_queue.h b/src/hle/rt64_workload_queue.h
+index bde2f03..3355899 100644
+--- a/src/hle/rt64_workload_queue.h
++++ b/src/hle/rt64_workload_queue.h
+@@ -23,6 +23,11 @@
+ #   include "render/rt64_raytracing_shader_cache.h"
+ #endif
+ 
++#if RT64_VR
++#   include "rt64_vr.h"
++#   include "rt64_vr_hud.h"
++#endif
++
+ #define WORKLOAD_QUEUE_SIZE 4
+ 
+ namespace RT64 {
+@@ -101,6 +106,50 @@ namespace RT64 {
+         uint32_t prevFrameIndex = uint32_t(gameFrames.size()) - 1;
+         uint32_t curFrameIndex = 0;
+ 
++#   if RT64_VR
++        // VR host (rt64_vr.h). When one is set at setup, the workload thread runs renderThreadLoopVR.
++        VrHost *vrHost = nullptr;
++        VrFrame vrFrame;
++        VrWorkloadInfo vrInfo;
++        int32_t vrEye = -1;
++        std::unique_ptr<RenderTarget> vrRightEyeTarget;
++        VrEyeStats vrLastEyeStats;
++        // The last eye pass of a display frame is submitted without waiting (RT64_VR_DEFER_WAIT=0
++        // waits as before); threadVrFinishSubmission waits for it after the next xrWaitFrame.
++        bool vrDeferSubmission = false;
++        bool vrPendingFinish = false;
++        bool vrPendingPassTimes = false;
++        int32_t vrPendingEye = -1;
++        VrEyeStats vrPendingStats;
++        void threadVrFinishSubmission();
++        // RT64_VR_PASS_TIMES: timestamps at every render pass break, logged every 600th frame.
++        std::unique_ptr<RenderQueryPool> vrPassMarkPool;
++        uint64_t vrPassMarkFrames = 0;
++        // Per game call of the held workload: where it is drawn in VR (VrCallClass).
++        enum VrCallClass : uint8_t { VrCallEye = 0, VrCallHud = 1, VrCallOffscreen = 2 };
++        enum class VrPass { None, Eye };
++        std::vector<uint8_t> vrCallClass;
++        uint64_t vrHudParts[7] = {};
++        bool vrLogHudCalls = false;
++        uint64_t vrClassifyCount = 0;
++        VrPass vrPass = VrPass::None;
++        bool vrHudCleared = false;
++        std::unique_ptr<RenderTarget> vrHudTarget[2];
++        std::unique_ptr<RenderTarget> vrHudDepthTarget;
++        std::unique_ptr<VrHudSolver> vrHudSolver;
++        std::unique_ptr<VrEyeCopier> vrEyeCopier;
++        std::unique_ptr<VrHiddenMask> vrHiddenMask;
++        bool vrHiddenMaskFailed = false;
++        bool vrMaskDrawn = false;
++        bool vrEyeCopierFailed = false;
++        bool vrHudSolverFailed = false;
++        RenderFramebuffer *vrHudFramebuffer = nullptr;
++        uint32_t vrHudWidth = 0;
++        uint32_t vrHudHeight = 0;
++        // The left eye's pass also draws the HUD (into vrHudTarget, solved into vrHudFramebuffer).
++        bool vrHudInPass() const { return (vrEye == 0) && (vrHudFramebuffer != nullptr) && (vrHudTarget[0] != nullptr) && (vrHudTarget[1] != nullptr) && (vrHudSolver != nullptr); }
++#   endif
++
+         WorkloadQueue();
+         ~WorkloadQueue();
+         void reset();
+@@ -121,6 +170,12 @@ namespace RT64 {
+         void threadAdvanceBarrier();
+         void threadAdvanceWorkloadId(uint64_t newWorkloadId);
+         void renderThreadLoop();
++#   if RT64_VR
++        void renderThreadLoopVR();
++        void threadDetectInterpolationTarget(const Workload &workload, RenderTargetKey &targetKey, int32_t &targetFbPairIndex);
++        void threadVrClassifyCamera(const Workload &workload, uint32_t mainColorAddress);
++        void threadVrClassifyCalls(const Workload &workload, uint32_t mainColorAddress, const uint32_t cameraGroups[2]);
++#   endif
+         void idleThreadLoop();
+     };
+ };
+\ No newline at end of file
+diff --git a/src/render/rt64_descriptor_sets.h b/src/render/rt64_descriptor_sets.h
+index 69a82ac..3005175 100644
+--- a/src/render/rt64_descriptor_sets.h
++++ b/src/render/rt64_descriptor_sets.h
+@@ -527,6 +527,9 @@ namespace RT64 {
+         uint32_t dstPos;
+         uint32_t dstTc;
+         uint32_t dstCol;
++#   if RT64_VR
++        uint32_t viewProjFogRemaps;
++#   endif
+ 
+         RSPProcessDescriptorSet(RenderDevice *device = nullptr) {
+             builder.begin();
+@@ -551,6 +554,9 @@ namespace RT64 {
+             dstPos = builder.addReadWriteStructuredBuffer(19);
+             dstTc = builder.addReadWriteStructuredBuffer(20);
+             dstCol = builder.addReadWriteStructuredBuffer(21);
++#       if RT64_VR
++            viewProjFogRemaps = builder.addStructuredBuffer(22);
++#       endif
+             builder.end();
+ 
+             if (device != nullptr) {
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index 9fae0d4..01ac4d2 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -15,6 +15,10 @@
+ 
+ #include "rt64_descriptor_sets.h"
+ #include "rt64_render_worker.h"
++#if RT64_VR
++#include "hle/rt64_vr.h"
++#include "shared/rt64_projection_fog.h"
++#endif
+ 
+ // TODO: Move to shared.
+ 
+@@ -451,6 +455,32 @@ namespace RT64 {
+ #   endif
+     }
+ 
++#if RT64_VR
++    VrDrawStats &GetVrDrawStats() {
++        static thread_local VrDrawStats stats;
++        return stats;
++    }
++
++    VrPassMarks &GetVrPassMarks() {
++        static thread_local VrPassMarks marks;
++        return marks;
++    }
++
++    void VrPassMark(RenderCommandList *commandList, uint32_t label) {
++        VrPassMarks &marks = GetVrPassMarks();
++        if ((marks.pool != nullptr) && (marks.count < marks.capacity) && (marks.count < std::size(marks.labels))) {
++            commandList->writeTimestamp(marks.pool, marks.count);
++            marks.labels[marks.count] = label;
++            marks.count++;
++        }
++    }
++
++    RenderFramebuffer *FramebufferRenderer::vrFoveationFramebuffer(RenderWorker *worker, RenderFramebuffer *framebuffer) {
++        return vrFoveationHost && vrFoveationEye >= 0
++            ? vrFoveationHost->foveatedFramebuffer(uint32_t(vrFoveationEye), worker->commandList.get(), framebuffer) : framebuffer;
++    }
++#endif
++
+     bool FramebufferRenderer::submitDepthAccess(RenderWorker *worker, RenderFramebufferStorage *fbStorage, bool readOnly, bool &depthState) {
+         if (depthState == readOnly) {
+             return false;
+@@ -460,6 +490,14 @@ namespace RT64 {
+         const RenderTextureLayout depthReadState = RenderTextureLayout::DEPTH_READ;
+         const RenderTextureLayout depthWriteState = RenderTextureLayout::DEPTH_WRITE;
+         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(fbStorage->depthTarget->texture.get(), readOnly ? depthReadState : RenderTextureLayout::DEPTH_WRITE));
++#   if RT64_VR
++        (readOnly ? GetVrDrawStats().depthReads : GetVrDrawStats().depthWrites)++;
++        if (GetVrDrawStats().logDraws) {
++            fprintf(stdout, "[vr-draw] -- depth %s\n", readOnly ? "read (decals)" : "write");
++        }
++        VrPassMark(worker->commandList.get(), readOnly ? 0x100 : 0x200);
++        renderFramebuffer = vrFoveationFramebuffer(worker, renderFramebuffer);
++#   endif
+         worker->commandList->setFramebuffer(renderFramebuffer);
+         depthState = readOnly;
+         return true;
+@@ -554,6 +592,18 @@ namespace RT64 {
+                 const interop::OtherMode otherMode = triangles.shaderDesc.otherMode;
+                 bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
+                 bool depthWrite = otherMode.zUpd();
++#           if RT64_VR
++                GetVrDrawStats().decalDraws += depthDecal ? 1 : 0;
++                if (GetVrDrawStats().logDraws) {
++                    const bool copyMode = (otherMode.cycleType() == G_CYC_COPY);
++                    fprintf(stdout, "[vr-draw] %u %s faces=%u zc=%d zu=%d zm=%d blend=%d ac=%u cvgxa=%d acs=%d cyc=%u non=%d scissor=%d,%d-%d,%d\n", i,
++                        drawCall.type == InstanceDrawCall::Type::IndexedTriangles ? "tri" : drawCall.type == InstanceDrawCall::Type::RawTriangles ? "raw" : "rect",
++                        triangles.faceCount, otherMode.zCmp() ? 1 : 0, otherMode.zUpd() ? 1 : 0, int(otherMode.zMode()), (!copyMode && interop::Blender::usesAlphaBlend(otherMode)) ? 1 : 0,
++                        otherMode.alphaCompare(), otherMode.cvgXAlpha() ? 1 : 0, otherMode.alphaCvgSel() ? 1 : 0, otherMode.cycleType(),
++                        triangles.shaderDesc.flags.NoN ? 1 : 0,
++                        triangles.scissor.left, triangles.scissor.top, triangles.scissor.right, triangles.scissor.bottom);
++                }
++#           endif
+                 if (depthDecal) {
+                     switchToDepthRead();
+                 }
+@@ -574,12 +624,32 @@ namespace RT64 {
+                 rasterParams.renderIndex = i;
+                 rasterParams.screenScale = triangles.screenScale;
+                 rasterParams.screenOffset = triangles.screenOffset;
++#           if RT64_VR
++                rasterParams.vrDepthRemap = triangles.depthRemap;
++#           endif
+                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);
+ 
++#if RT64_VR
++                if (vrFoveationHost) {
++                    // Preserve pixel-addressed depth comparisons, low-res UV snapping,
++                    // alpha dither and no-near-clip draws. Ordinary 3-point texture filtering
++                    // keeps native texture UVs; FragCoord remains in full framebuffer pixels.
++                    const auto &combiner = triangles.shaderDesc.colorCombiner;
++                    const bool combinerNoise = otherMode.cycleType() != G_CYC_COPY
++                        && (combiner.decodeColorInput(0, true) == interop::ColorCombiner::C_NOISE
++                            || (otherMode.cycleType() == G_CYC_2CYCLE && combiner.decodeColorInput(0, false) == interop::ColorCombiner::C_NOISE));
++                    const bool pixelExact = depthDecal || !triangles.shaderDesc.flags.upscale2D
++                        || triangles.shaderDesc.flags.NoN || combinerNoise || otherMode.alphaCompare() == G_AC_DITHER;
++                    vrFoveationHost->setFoveationRate(worker->commandList.get(), !pixelExact);
++                }
++#endif
+                 drawCallTriangles(drawCall);
+ 
+                 // Simulate dither noise.
+                 if (triangles.postBlendDitherNoise) {
++#if RT64_VR
++                    if (vrFoveationHost) vrFoveationHost->setFoveationRate(worker->commandList.get(), false);
++#endif
+                     if (triangles.postBlendDitherNoiseNegative) {
+                         worker->commandList->setPipeline(postBlendDitherNoiseSubNegativePipeline);
+                     }
+@@ -601,6 +671,13 @@ namespace RT64 {
+                 RenderTarget *chosenTarget = (fbStorage->colorTarget != nullptr) ? fbStorage->colorTarget : fbStorage->depthTarget;
+                 bool rectCoversWholeTarget = (clearRect.rect.left == 0) && (clearRect.rect.top == 0) && (uint32_t(clearRect.rect.right) == chosenTarget->width) && (uint32_t(clearRect.rect.bottom) == chosenTarget->height);
+                 const RenderRect *clearRects = rectCoversWholeTarget ? nullptr : &clearRect.rect;
++#           if RT64_VR
++                GetVrDrawStats().clears++;
++                if (GetVrDrawStats().logDraws) {
++                    fprintf(stdout, "[vr-draw] %u clear %s %d,%d-%d,%d of %ux%u\n", i, (fbStorage->colorTarget != nullptr) ? "color" : "depth",
++                        clearRect.rect.left, clearRect.rect.top, clearRect.rect.right, clearRect.rect.bottom, chosenTarget->width, chosenTarget->height);
++                }
++#           endif
+                 uint32_t clearRectCount = rectCoversWholeTarget ? 0 : 1;
+                 if (fbStorage->colorTarget != nullptr) {
+                     worker->commandList->clearColor(0, clearRect.color, clearRects, clearRectCount);
+@@ -616,6 +693,9 @@ namespace RT64 {
+                 assert(fbStorage->colorTarget != nullptr);
+ 
+                 const interop::RSPVertexTestZCB &testZCB = drawCall.vertexTestZ;
++#           if RT64_VR
++                GetVrDrawStats().testZ++;
++#           endif
+                 switchToDepthRead();
+ 
+                 const bool useMSAA = (fbStorage->colorTarget->multisampling.sampleCount > 0);
+@@ -1249,7 +1329,18 @@ namespace RT64 {
+         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, startBarriers);
+ 
+         bool depthState = false;
+-        worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorDepthWrite.get());
++#   if RT64_VR
++        VrPassMark(worker->commandList.get(), 0x300 | (framebufferIndex & 0xFF));
++        if (GetVrDrawStats().logDraws) {
++            fprintf(stdout, "[vr-draw] == framebuffer %u: color %s %ux%u, depth %ux%u\n", framebufferIndex, (colorTarget != nullptr) ? "yes" : "no",
++                (colorTarget != nullptr) ? colorTarget->width : 0, (colorTarget != nullptr) ? colorTarget->height : 0, depthTarget->width, depthTarget->height);
++        }
++#   endif
++        RenderFramebuffer *initialFramebuffer = targetDrawCall.fbStorage->colorDepthWrite.get();
++#if RT64_VR
++        initialFramebuffer = vrFoveationFramebuffer(worker, initialFramebuffer);
++#endif
++        worker->commandList->setFramebuffer(initialFramebuffer);
+         for (const auto &pair : targetDrawCall.sceneIndices) {
+ #       if RT_ENABLED
+             if (pair.second) {
+@@ -1439,7 +1530,14 @@ namespace RT64 {
+         interop::RenderIndices renderIndices;
+         uint32_t globalCallIndex = 0;
+         const float wideWidth = p.fbWidth * p.resolutionScale.x;
++#   if RT64_VR
++        // Stretched VR passes scale each axis on its own (eye width / 320, eye height / 240):
++        // the original width is the whole width, or viewports narrower than the frame would be
++        // widened by the axes' ratio (4:3 for a square eye).
++        const float originalWidth = p.vrStretched ? (p.fbWidth * p.resolutionScale.x) : (p.fbWidth * p.resolutionScale.y);
++#   else
+         const float originalWidth = p.fbWidth * p.resolutionScale.y;
++#   endif
+         const float commonHeight = float(p.targetHeight);
+         framebuffer.viewport = RenderViewport(0.0f, 0.0f, wideWidth, commonHeight);
+         
+@@ -1479,6 +1577,17 @@ namespace RT64 {
+             
+             auto &triangles = instanceDrawCall.triangles;
+             triangles.screenScale = { 1.0f, 1.0f };
++#       if RT64_VR
++            triangles.depthRemap = { 1.0f, 0.0f };
++            if (p.vrEyePass && (proj.type == Projection::Type::Perspective)) {
++                const interop::float2 &fog = drawData.modViewProjFogRemaps[proj.transformsIndex];
++                const auto &viewport = drawData.rspViewports[proj.transformsIndex];
++                // Convert NDC fog coefficients to the actual N64 viewport's screen-depth
++                // range. Do not assume its far endpoint: preserve its original clip boundary.
++                const ProjectionFogRemap screen = projectionScreenRemap(fog.x, fog.y, viewport.scale.z, viewport.translate.z);
++                triangles.depthRemap = { screen.a, screen.b };
++            }
++#       endif
+             triangles.screenOffset = halfPixelOffset;
+ 
+             float projInvRatioScale = 1.0f / aspectRatioScale;
+@@ -1508,6 +1617,12 @@ namespace RT64 {
+ 
+             for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
+                 const GameCall &call = proj.gameCalls[d];
++#           if RT64_VR
++                if ((p.vrSkipMask != 0) && (call.callDesc.callIndex < p.vrCallClassCount) && (p.vrSkipMask & (1U << p.vrCallClass[call.callDesc.callIndex]))) {
++                    globalCallIndex++;
++                    continue;
++                }
++#           endif
+                 renderIndices.instanceIndex = call.callDesc.callIndex;
+                 renderIndices.faceIndicesStart = call.meshDesc.faceIndicesStart;
+                 renderIndices.rdpTileIndex = call.callDesc.tileIndex;
+@@ -1608,6 +1723,10 @@ namespace RT64 {
+                         triangles.shaderDesc = call.shaderDesc;
+ 
+                         RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
++#                   if RT64_VR
++                        GetVrDrawStats().draws++;
++                        GetVrDrawStats().uberDraws += (gpuShader == nullptr) ? 1 : 0;
++#                   endif
+                         if (gpuShader != nullptr) {
+                             triangles.pipeline = gpuShader->pipeline.get();
+                         }
+@@ -1917,4 +2036,4 @@ namespace RT64 {
+         unsigned int im3dVertexCount;
+     };
+ };
+-*/
+\ No newline at end of file
++*/
+diff --git a/src/render/rt64_framebuffer_renderer.h b/src/render/rt64_framebuffer_renderer.h
+index 3add9c3..5a00afe 100644
+--- a/src/render/rt64_framebuffer_renderer.h
++++ b/src/render/rt64_framebuffer_renderer.h
+@@ -30,6 +30,9 @@
+ #endif
+ 
+ namespace RT64 {
++#if RT64_VR
++    class VrHost;
++#endif
+     struct DynamicTextureView {
+         const RenderTexture *texture = nullptr;
+         uint32_t dstIndex = 0;
+@@ -58,6 +61,34 @@ namespace RT64 {
+         uint32_t indexCount;
+     };
+ 
++#if RT64_VR
++    // Per recording thread, for the VR host's frame statistics: reset by the caller.
++    struct VrDrawStats {
++        uint32_t draws = 0;
++        uint32_t uberDraws = 0;
++        uint32_t decalDraws = 0;
++        uint32_t depthReads = 0;   // switches to the depth-read-only framebuffer (each ends the render pass)
++        uint32_t depthWrites = 0;  // switches back
++        uint32_t testZ = 0;        // vertex depth tests (a compute dispatch inside the pair)
++        uint32_t clears = 0;
++        bool logDraws = false;     // RT64_VR_LOG_DRAWS: list this pass's draws
++    };
++
++    VrDrawStats &GetVrDrawStats();
++
++    // Optional GPU timestamps at every render pass break of the pairs recorded on this thread
++    // (RT64_VR_PASS_TIMES). The caller resets the pool and the count before recording.
++    struct VrPassMarks {
++        RenderQueryPool *pool = nullptr;
++        uint32_t capacity = 0;
++        uint32_t count = 0;
++        uint32_t labels[128] = {};
++    };
++
++    VrPassMarks &GetVrPassMarks();
++    void VrPassMark(RenderCommandList *commandList, uint32_t label);
++#endif
++
+     struct FramebufferRenderer {
+         std::vector<uint32_t> textureCacheVersions;
+         std::vector<Texture *> textureCacheTextures;
+@@ -123,6 +154,12 @@ namespace RT64 {
+         std::vector<Framebuffer> framebufferVector;
+         std::vector<BufferUploader *> pendingUploaders;
+         uint32_t framebufferCount = 0;
++#if RT64_VR
++        VrHost *vrFoveationHost = nullptr;
++        int32_t vrFoveationEye = -1;
++        void setVrFoveation(VrHost *host, int32_t eye) { vrFoveationHost = host; vrFoveationEye = eye; }
++        RenderFramebuffer *vrFoveationFramebuffer(RenderWorker *worker, RenderFramebuffer *framebuffer);
++#endif
+ 
+         struct DrawParams {
+             RenderWorker *worker;
+@@ -147,6 +184,17 @@ namespace RT64 {
+             bool postBlendNoise;
+             bool postBlendNoiseNegative;
+             uint32_t maxGameCall;
++#       if RT64_VR
++            // VR passes: game calls whose class (indexed by call index) has its bit set in the
++            // mask are left out (rt64_workload_queue.cpp, VrCallClass).
++            const uint8_t *vrCallClass = nullptr;
++            uint32_t vrCallClassCount = 0;
++            uint8_t vrSkipMask = 0;
++            // The frame is stretched to the target without aspect correction (VR eye and HUD
++            // passes): the horizontal scale is not a widened version of the vertical one.
++            bool vrStretched = false;
++            bool vrEyePass = false;
++#       endif
+         };
+ 
+         FramebufferRenderer(RenderWorker *worker, bool rtSupport, UserConfiguration::GraphicsAPI graphicsAPI, const ShaderLibrary *shaderLibrary);
+@@ -179,4 +227,4 @@ namespace RT64 {
+         void setRaytracingConfig(const RaytracingConfiguration &rtConfig, bool resolutionChanged);
+ #   endif
+     };
+-};
+\ No newline at end of file
++};
+diff --git a/src/render/rt64_framebuffer_renderer_call.h b/src/render/rt64_framebuffer_renderer_call.h
+index f2eee70..33c3a3a 100644
+--- a/src/render/rt64_framebuffer_renderer_call.h
++++ b/src/render/rt64_framebuffer_renderer_call.h
+@@ -35,6 +35,9 @@ namespace RT64 {
+                 const RenderPipeline *pipeline;
+                 interop::float2 screenScale;
+                 interop::float2 screenOffset;
++#           if RT64_VR
++                interop::float2 depthRemap;
++#           endif
+                 RenderRect scissor;
+                 uint32_t indexStart;
+                 uint32_t faceCount;
+@@ -61,4 +64,4 @@ namespace RT64 {
+ 
+         ~InstanceDrawCall() { }
+     };
+-};
+\ No newline at end of file
++};
+diff --git a/src/render/rt64_projection_processor.cpp b/src/render/rt64_projection_processor.cpp
+index e842dcc..dd12ec3 100644
+--- a/src/render/rt64_projection_processor.cpp
++++ b/src/render/rt64_projection_processor.cpp
+@@ -6,6 +6,9 @@
+ 
+ #include "common/rt64_math.h"
+ #include "hle/rt64_workload_queue.h"
++#if RT64_VR
++#include "shared/rt64_projection_fog.h"
++#endif
+ 
+ namespace RT64 {
+     inline void adjustProjectionMatrix(interop::float4x4 &matrix, const float aspectRatioScale) {
+@@ -36,6 +39,10 @@ namespace RT64 {
+             drawData.modViewTransforms = drawData.viewTransforms;
+             drawData.modProjTransforms = drawData.projTransforms;
+             drawData.modViewProjTransforms = drawData.viewProjTransforms;
++#       if RT64_VR
++            drawData.modViewProjFogRemaps = drawData.viewProjFogRemaps;
++            drawData.vrBillboardViewpointRank = 0;
++#       endif
+             drawData.prevViewTransforms = drawData.viewTransforms;
+             drawData.prevProjTransforms = drawData.projTransforms;
+             drawData.prevViewProjTransforms = drawData.viewProjTransforms;
+@@ -140,6 +147,57 @@ namespace RT64 {
+                 prevProjTransform = projMatrix;
+             }
+ 
++#       if RT64_VR
++            // Eye pass: the camera takes the eye's view and projection, built by the host from the
++            // interpolated game camera (rt64_vr.h). The previous transforms follow, so nothing
++            // reads the head's motion as object motion.
++            VrHost *vrHost = (p.vrEye >= 0) ? GetVrHost() : nullptr;
++            if ((vrHost != nullptr) && isVrCamera(workload, fbPair, proj, p.vrMainColorAddress, p.vrCameraGroups)) {
++                float gameView[16], gameProj[16], eyeView[16], eyeProj[16];
++                for (int r = 0; r < 4; r++) {
++                    for (int c = 0; c < 4; c++) {
++                        gameView[r * 4 + c] = viewMatrix[r][c];
++                        gameProj[r * 4 + c] = projMatrix[r][c];
++                    }
++                }
++
++                vrHost->eyeCamera(uint32_t(p.vrEye), gameView, gameProj, eyeView, eyeProj);
++                const ProjectionFogRemap fog = projectionFogRemap(gameProj, eyeProj);
++                drawData.modViewProjFogRemaps[proj.transformsIndex] = interop::float2(fog.a, fog.b);
++                for (int r = 0; r < 4; r++) {
++                    for (int c = 0; c < 4; c++) {
++                        viewMatrix[r][c] = eyeView[r * 4 + c];
++                        projMatrix[r][c] = eyeProj[r * 4 + c];
++                    }
++                }
++
++                prevViewTransform = viewMatrix;
++                prevProjTransform = projMatrix;
++
++                // The billboards' viewpoint, from the same pose as this eye's view.
++                const VrBillboardGroup *billboardGroups = nullptr;
++                if (vrHost->billboardGroups(&billboardGroups) > 0) {
++                    const uint32_t groupIndex = drawData.viewProjTransformGroups[proj.transformsIndex];
++                    const uint32_t matrixId = drawData.transformGroups[groupIndex].matrixId;
++                    const uint32_t rank = ((p.vrCameraGroups[0] != 0) && (matrixId == p.vrCameraGroups[0])) ? 2 : 1;
++                    float point[3];
++                    if ((rank > drawData.vrBillboardViewpointRank) && vrHost->billboardViewpoint(uint32_t(p.vrEye), point)) {
++                        drawData.vrBillboardViewpointRank = rank;
++                        drawData.vrBillboardViewpoint[0] = point[0];
++                        drawData.vrBillboardViewpoint[1] = point[1];
++                        drawData.vrBillboardViewpoint[2] = point[2];
++                        const hlslpp::float4x4 gameCamera = hlslpp::inverse(drawData.viewTransforms[proj.transformsIndex]);
++                        drawData.vrBillboardGameViewpoint[0] = gameCamera[3][0];
++                        drawData.vrBillboardGameViewpoint[1] = gameCamera[3][1];
++                        drawData.vrBillboardGameViewpoint[2] = gameCamera[3][2];
++                        drawData.vrBillboardGameBack[0] = gameCamera[2][0];
++                        drawData.vrBillboardGameBack[1] = gameCamera[2][1];
++                        drawData.vrBillboardGameBack[2] = gameCamera[2][2];
++                    }
++                }
++            }
++#       endif
++
+             viewProjMatrix = hlslpp::mul(viewMatrix, projMatrix);
+ 
+             interop::float4x4 &prevViewProjTransform = drawData.prevViewProjTransforms[proj.transformsIndex];
+@@ -147,6 +205,22 @@ namespace RT64 {
+         }
+     }
+ 
++#if RT64_VR
++    bool ProjectionProcessor::isVrCamera(const Workload &workload, const RT64::FramebufferPair &fbPair, const Projection &proj, uint32_t mainColorAddress, const uint32_t cameraGroups[2]) {
++        if ((proj.type != Projection::Type::Perspective) || (fbPair.colorImage.address != mainColorAddress)) {
++            return false;
++        }
++
++        if ((cameraGroups[0] == 0) && (cameraGroups[1] == 0)) {
++            return true;
++        }
++
++        const uint32_t groupIndex = workload.drawData.viewProjTransformGroups[proj.transformsIndex];
++        const uint32_t matrixId = workload.drawData.transformGroups[groupIndex].matrixId;
++        return ((cameraGroups[0] != 0) && (matrixId == cameraGroups[0])) || ((cameraGroups[1] != 0) && (matrixId == cameraGroups[1]));
++    }
++#endif
++
+     void ProjectionProcessor::upload(const ProcessParams &p) {
+         uploads.clear();
+ 
+@@ -156,8 +230,11 @@ namespace RT64 {
+             DrawBuffers &drawBuffers = workload.drawBuffers;
+             std::pair<size_t, size_t> uploadRange = { 0, drawData.viewProjTransforms.size() };
+             uploads.emplace_back(BufferUploader::Upload{ drawData.modViewProjTransforms.data(), uploadRange, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &drawBuffers.viewProjTransformsBuffer });
++#       if RT64_VR
++            uploads.emplace_back(BufferUploader::Upload{ drawData.modViewProjFogRemaps.data(), uploadRange, sizeof(interop::float2), RenderBufferFlag::STORAGE, { }, &drawBuffers.viewProjFogRemapsBuffer });
++#       endif
+         }
+ 
+         bufferUploader->submit(p.worker, uploads);
+     }
+-};
+\ No newline at end of file
++};
+diff --git a/src/render/rt64_projection_processor.h b/src/render/rt64_projection_processor.h
+index 5bc3a2a..e46c24e 100644
+--- a/src/render/rt64_projection_processor.h
++++ b/src/render/rt64_projection_processor.h
+@@ -5,6 +5,7 @@
+ #pragma once
+ 
+ #include "hle/rt64_game_frame.h"
++#include "hle/rt64_framebuffer_pair.h"
+ 
+ #include "rt64_buffer_uploader.h"
+ 
+@@ -21,6 +22,13 @@ namespace RT64 {
+             float curFrameWeight = 1.0f;
+             float prevFrameWeight = 0.0f;
+             float aspectRatioScale = 1.0f;
++#       if RT64_VR
++            // Eye pass: camera projections take the host's eye camera. With both groups 0, every
++            // perspective projection drawn into the main color image is the camera.
++            int32_t vrEye = -1;
++            uint32_t vrMainColorAddress = 0;
++            uint32_t vrCameraGroups[2] = {};
++#       endif
+         };
+ 
+         ProjectionProcessor();
+@@ -29,5 +37,8 @@ namespace RT64 {
+         void process(const ProcessParams &p);
+         void processScene(const ProcessParams &p, const GameScene &scene, size_t sceneIndex);
+         void upload(const ProcessParams &p);
++#   if RT64_VR
++        static bool isVrCamera(const Workload &workload, const RT64::FramebufferPair &fbPair, const Projection &proj, uint32_t mainColorAddress, const uint32_t cameraGroups[2]);
++#   endif
+     };
+ };
+\ No newline at end of file
+diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
+index 721a01e..596f15a 100644
+--- a/src/render/rt64_raster_shader.cpp
++++ b/src/render/rt64_raster_shader.cpp
+@@ -126,6 +126,14 @@ namespace RT64 {
+             
+             specConstants[0].values[0] = desc.otherMode.L;
+             specConstants[1].values[0] = desc.otherMode.H;
++#       if RT64_VR
++            // Diagnostics: RT64_VR_EXP_POINT=1 samples every texture with one point tap, to
++            // measure what filtering costs. Never a default.
++            static const bool expPoint = (getenv("RT64_VR_EXP_POINT") != nullptr);
++            if (expPoint) {
++                specConstants[1].values[0] = desc.otherMode.H & ~(3U << G_MDSFT_TEXTFILT);
++            }
++#       endif
+             specConstants[2].values[0] = desc.colorCombiner.L;
+             specConstants[3].values[0] = desc.colorCombiner.H;
+             specConstants[4].values[0] = desc.flags.value;
+diff --git a/src/render/rt64_rsp_processor.cpp b/src/render/rt64_rsp_processor.cpp
+index 5687b81..fdd8e57 100644
+--- a/src/render/rt64_rsp_processor.cpp
++++ b/src/render/rt64_rsp_processor.cpp
+@@ -47,6 +47,9 @@ namespace RT64 {
+         processSet->setBuffer(processSet->dstPos, p.outputBuffers->screenPosBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 4));
+         processSet->setBuffer(processSet->dstTc, p.outputBuffers->genTexCoordBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 2));
+         processSet->setBuffer(processSet->dstCol, p.outputBuffers->shadedColBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 4));
++#   if RT64_VR
++        processSet->setBuffer(processSet->viewProjFogRemaps, p.drawBuffers->viewProjFogRemapsBuffer.get(), RenderBufferStructuredView(sizeof(interop::float2)));
++#   endif
+ 
+         const uint32_t modifyCount = drawData.modifyCount();
+         modifyCB.modifyCount = modifyCount;
+diff --git a/src/render/rt64_transform_processor.cpp b/src/render/rt64_transform_processor.cpp
+index cd8004d..249e9cf 100644
+--- a/src/render/rt64_transform_processor.cpp
++++ b/src/render/rt64_transform_processor.cpp
+@@ -8,6 +8,12 @@
+ #include "hle/rt64_game_frame.h"
+ #include "hle/rt64_workload_queue.h"
+ 
++#include <algorithm>
++#include <cfloat>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++
+ namespace RT64 {
+     // TransformProcessor
+     
+@@ -66,9 +72,182 @@ namespace RT64 {
+                     invTMatrix = hlslpp::transpose(invMatrix);
+                     invTWorldTransforms.push_back(invTMatrix);
+                 }
++
++#           if RT64_VR
++                // Eye passes with billboards upload copies like interpolated transforms, turned
++                // below when there is a viewpoint.
++                if (p.vrBillboardGroupCount > 0) {
++                    lerpWorldTransforms = drawData.worldTransforms;
++                    prevWorldTransforms = drawData.worldTransforms;
++                }
++#           endif
++            }
++
++#       if RT64_VR
++            if ((p.vrBillboardGroupCount > 0) && (drawData.vrBillboardViewpointRank > 0) && (lerpWorldTransforms.size() == drawData.worldTransforms.size())) {
++                faceBillboards(p, drawData);
++            }
++#       endif
++        }
++    }
++
++#if RT64_VR
++    void TransformProcessor::faceBillboards(const ProcessParams &p, DrawData &drawData) {
++        // Diagnostics: RT64_VR_LOG_BILLBOARDS=<period> logs every period-th call (1 means 600) how
++        // many billboards were turned, and the first one before and after.
++        static const uint64_t logPeriod = (getenv("RT64_VR_LOG_BILLBOARDS") != nullptr) ? std::max<uint64_t>(1, strtoull(getenv("RT64_VR_LOG_BILLBOARDS"), nullptr, 10)) : 0;
++        static uint64_t logCalls = 0;
++        const bool logThis = (logPeriod > 0) && ((logCalls++ % ((logPeriod == 1) ? 600 : logPeriod)) == 0);
++        uint32_t turned[4] = {};
++        bool loggedFirst = false;
++        const size_t transformCount = std::min(drawData.worldTransforms.size(), drawData.worldTransformGroups.size());
++
++        // The billboards, and the bounds of each one's vertices (local coordinates). A billboard
++        // turns about its origin, unless the origin lies outside its vertices' bounds: then the
++        // game turned it about a point of its own (a map's billboard nodes pivot at the node, far
++        // from the map origin), and it turns about the bounds' centre.
++        thread_local std::vector<uint8_t> modes;
++        thread_local std::vector<hlslpp::float3> boundsMin, boundsMax;
++        modes.assign(transformCount, uint8_t(VrBillboardMode::None));
++        bool anyBillboard = false;
++        for (size_t t = 0; t < transformCount; t++) {
++            const uint32_t groupIndex = drawData.worldTransformGroups[t];
++            if (groupIndex < drawData.transformGroups.size()) {
++                modes[t] = uint8_t(vrBillboardMode(p.vrBillboardGroups, p.vrBillboardGroupCount, drawData.transformGroups[groupIndex].matrixId));
++                anyBillboard = anyBillboard || (modes[t] != uint8_t(VrBillboardMode::None));
++            }
++        }
++
++        // Diagnostics: untagged model matrices that face the game camera like a billboard (their
++        // Z axis, or X x Y, along the camera's back axis): candidates for the profile's groups.
++        if (logThis) {
++            const hlslpp::float3 back = hlslpp::normalize(hlslpp::float3(drawData.vrBillboardGameBack[0], drawData.vrBillboardGameBack[1], drawData.vrBillboardGameBack[2]));
++            uint32_t candidates = 0;
++            uint32_t ids[8] = {};
++            uint32_t idCount = 0;
++            for (size_t t = 0; t < transformCount; t++) {
++                if (modes[t] != uint8_t(VrBillboardMode::None)) {
++                    continue;
++                }
++
++                const interop::float4x4 &w = drawData.worldTransforms[t];
++                hlslpp::float3 z(w[2][0], w[2][1], w[2][2]);
++                if (float(hlslpp::length(z)) < 1e-6f) {
++                    z = hlslpp::cross(hlslpp::float3(w[0][0], w[0][1], w[0][2]), hlslpp::float3(w[1][0], w[1][1], w[1][2]));
++                }
++
++                if ((float(hlslpp::length(z)) < 1e-6f) || (std::fabs(float(hlslpp::dot(hlslpp::normalize(z), back))) < 0.99995f)) {
++                    continue;
++                }
++
++                candidates++;
++                const uint32_t groupIndex = drawData.worldTransformGroups[t];
++                const uint32_t id = (groupIndex < drawData.transformGroups.size()) ? drawData.transformGroups[groupIndex].matrixId : 0;
++                bool seen = false;
++                for (uint32_t i = 0; i < idCount; i++) {
++                    seen = seen || (ids[i] == id);
++                }
++
++                if (!seen && (idCount < 8)) {
++                    ids[idCount++] = id;
++                }
++            }
++
++            fprintf(stdout, "[rt64-vr] untagged camera-facing matrices: %u (groups %08X %08X %08X %08X %08X %08X %08X %08X)\n", candidates,
++                ids[0], ids[1], ids[2], ids[3], ids[4], ids[5], ids[6], ids[7]);
++        }
++
++        if (!anyBillboard) {
++            if (logThis) {
++                fflush(stdout);
+             }
++
++            return;
++        }
++
++        boundsMin.assign(transformCount, hlslpp::float3(FLT_MAX, FLT_MAX, FLT_MAX));
++        boundsMax.assign(transformCount, hlslpp::float3(-FLT_MAX, -FLT_MAX, -FLT_MAX));
++        const size_t vertexCount = std::min(drawData.worldIndices.size(), drawData.posFloats.size() / 3);
++        for (size_t v = 0; v < vertexCount; v++) {
++            const uint16_t t = drawData.worldIndices[v];
++            if ((t < transformCount) && (modes[t] != uint8_t(VrBillboardMode::None))) {
++                const hlslpp::float3 position(drawData.posFloats[v * 3 + 0], drawData.posFloats[v * 3 + 1], drawData.posFloats[v * 3 + 2]);
++                boundsMin[t] = hlslpp::min(boundsMin[t], position);
++                boundsMax[t] = hlslpp::max(boundsMax[t], position);
++            }
++        }
++
++        for (size_t t = 0; t < transformCount; t++) {
++            const VrBillboardMode mode = VrBillboardMode(modes[t]);
++            if (mode == VrBillboardMode::None) {
++                continue;
++            }
++
++            const uint32_t groupIndex = drawData.worldTransformGroups[t];
++            float pivot[3] = {};
++            if (float(boundsMin[t].x) <= float(boundsMax[t].x)) {
++                const float slack = 1.0f;
++                const bool originInside =
++                    (float(boundsMin[t].x) - slack <= 0.0f) && (float(boundsMax[t].x) + slack >= 0.0f) &&
++                    (float(boundsMin[t].y) - slack <= 0.0f) && (float(boundsMax[t].y) + slack >= 0.0f) &&
++                    (float(boundsMin[t].z) - slack <= 0.0f) && (float(boundsMax[t].z) + slack >= 0.0f);
++                if (!originInside) {
++                    const hlslpp::float3 centre = (boundsMin[t] + boundsMax[t]) * 0.5f;
++                    pivot[0] = float(centre.x);
++                    pivot[1] = float(centre.y);
++                    pivot[2] = float(centre.z);
++                }
++            }
++
++            // The current and the previous (motion) matrix face the same point, so turning the
++            // head never reads as the billboard's own motion.
++            auto face = [&](interop::float4x4 &matrix) {
++                float m[16];
++                for (int r = 0; r < 4; r++) {
++                    for (int c = 0; c < 4; c++) {
++                        m[r * 4 + c] = matrix[r][c];
++                    }
++                }
++
++                if (!vrFaceBillboard(m, drawData.vrBillboardViewpoint, mode, drawData.vrBillboardGameViewpoint, pivot)) {
++                    return false;
++                }
++
++                for (int r = 0; r < 4; r++) {
++                    for (int c = 0; c < 3; c++) {
++                        matrix[r][c] = m[r * 4 + c];
++                    }
++                }
++
++                return true;
++            };
++
++            interop::float4x4 before = drawData.lerpWorldTransforms[t];
++            if (face(drawData.lerpWorldTransforms[t])) {
++                drawData.invTWorldTransforms[t] = hlslpp::transpose(hlslpp::inverse(drawData.lerpWorldTransforms[t]));
++                face(drawData.prevWorldTransforms[t]);
++                turned[uint32_t(mode)]++;
++                if (logThis && !loggedFirst) {
++                    loggedFirst = true;
++                    const interop::float4x4 &after = drawData.lerpWorldTransforms[t];
++                    fprintf(stdout, "[rt64-vr] billboard group %08X at %.1f %.1f %.1f (pivot %.1f %.1f %.1f), viewpoint %.1f %.1f %.1f: z axis %.3f %.3f %.3f -> %.3f %.3f %.3f, y axis %.3f %.3f %.3f -> %.3f %.3f %.3f\n",
++                        drawData.transformGroups[groupIndex].matrixId, after[3][0], after[3][1], after[3][2], pivot[0], pivot[1], pivot[2],
++                        drawData.vrBillboardViewpoint[0], drawData.vrBillboardViewpoint[1], drawData.vrBillboardViewpoint[2],
++                        before[2][0], before[2][1], before[2][2], after[2][0], after[2][1], after[2][2],
++                        before[1][0], before[1][1], before[1][2], after[1][0], after[1][1], after[1][2]);
++                }
++            }
++            else if (logThis) {
++                turned[0]++;
++            }
++        }
++
++        if (logThis) {
++            fprintf(stdout, "[rt64-vr] billboards turned: %u cylindrical, %u spherical, %u matching, %u left (degenerate) of %zu transforms\n", turned[1], turned[2], turned[3], turned[0], transformCount);
++            fflush(stdout);
+         }
+     }
++#endif
+     
+     void TransformProcessor::upload(const ProcessParams &p) {
+         uploads.clear();
+diff --git a/src/render/rt64_transform_processor.h b/src/render/rt64_transform_processor.h
+index 50d9b6f..0e1e829 100644
+--- a/src/render/rt64_transform_processor.h
++++ b/src/render/rt64_transform_processor.h
+@@ -6,7 +6,12 @@
+ 
+ #include "rt64_buffer_uploader.h"
+ 
++#if RT64_VR
++#include "shared/rt64_vr_billboard.h"
++#endif
++
+ namespace RT64 {
++    struct DrawData;
+     struct GameFrame;
+     struct WorkloadQueue;
+ 
+@@ -21,6 +26,12 @@ namespace RT64 {
+             const GameFrame *prevFrame = nullptr;
+             float curFrameWeight = 1.0f;
+             float prevFrameWeight = 0.0f;
++#       if RT64_VR
++            // Eye pass: model matrices in these groups face the workload's billboard viewpoint
++            // after interpolation (rt64_vr_billboard.h).
++            const VrBillboardGroup *vrBillboardGroups = nullptr;
++            uint32_t vrBillboardGroupCount = 0;
++#       endif
+         };
+ 
+         TransformProcessor();
+@@ -28,5 +39,8 @@ namespace RT64 {
+         void setup(RenderWorker *worker);
+         void process(const ProcessParams &p);
+         void upload(const ProcessParams &p);
++#   if RT64_VR
++        static void faceBillboards(const ProcessParams &p, DrawData &drawData);
++#   endif
+     };
+ };
+\ No newline at end of file
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index b4ff4e9..5e3b6aa 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -69,7 +69,12 @@ namespace RT64 {
+ 
+         RenderViewport viewport;
+         RenderRect scissor;
+-        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
++        if (p.swapChain != nullptr) {
++            getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
++        }
++        else {
++            getViewportAndScissor(p.targetWidth, p.targetHeight, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
++        }
+         p.commandList->setViewports(viewport);
+         p.commandList->setScissors(scissor);
+ 
+@@ -87,6 +92,10 @@ namespace RT64 {
+     }
+ 
+     void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
++        getViewportAndScissor(swapChain->getWidth(), swapChain->getHeight(), vi, resolutionScale, downsamplingScale, removeBlackBorders, viewport, scissor);
++    }
++
++    void VIRenderer::getViewportAndScissor(uint32_t windowWidth, uint32_t windowHeight, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
+         // We define three different coordinate spaces to work with to translate the VI parameters into the Window.
+         //
+         // VideoSD: This corresponds to the SD TV Scanline space, which is what the VI natively works on.
+@@ -102,7 +111,7 @@ namespace RT64 {
+         // specified by the VI.
+         const hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
+         const hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
+-        const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
++        const hlslpp::float2 windowSize = { float(windowWidth), float(windowHeight) };
+ 
+         // Query the VI for the current rendering area.
+         hlslpp::float4 viViewRect = vi.viewRectangle() * sdSize.xyxy;
+diff --git a/src/render/rt64_vi_renderer.h b/src/render/rt64_vi_renderer.h
+index 8a3782a..d83bd99 100644
+--- a/src/render/rt64_vi_renderer.h
++++ b/src/render/rt64_vi_renderer.h
+@@ -29,11 +29,15 @@ namespace RT64 {
+             UserConfiguration::Filtering filtering = UserConfiguration::Filtering::Linear;
+             const VI *vi = nullptr;
+             bool removeBlackBorders = false;
++            // Size of the target drawn into when there is no swap chain (a VR panel).
++            uint32_t targetWidth = 0;
++            uint32_t targetHeight = 0;
+         };
+ 
+         VIRenderer();
+         ~VIRenderer();
+         void render(const RenderParams &p);
+         static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
++        static void getViewportAndScissor(uint32_t windowWidth, uint32_t windowHeight, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
+     };
+ };
+\ No newline at end of file
+diff --git a/src/shaders/RSPProcessCS.hlsl b/src/shaders/RSPProcessCS.hlsl
+index b02446e..ef9a8f4 100644
+--- a/src/shaders/RSPProcessCS.hlsl
++++ b/src/shaders/RSPProcessCS.hlsl
+@@ -8,6 +8,9 @@
+ #include "shared/rt64_rsp_viewport.h"
+ 
+ #include "TextureGen.hlsli"
++#ifdef RT64_VR_SHADERS
++#include "shared/rt64_projection_fog.h"
++#endif
+ 
+ #define GROUP_SIZE 64
+ 
+@@ -40,6 +43,9 @@ StructuredBuffer<float4x4> worldTransforms : register(t18);
+ RWStructuredBuffer<float4> dstPos : register(u19);
+ RWStructuredBuffer<float2> dstTc : register(u20);
+ RWStructuredBuffer<float4> dstCol : register(u21);
++#ifdef RT64_VR_SHADERS
++StructuredBuffer<float2> viewProjFogRemaps : register(t22);
++#endif
+ 
+ [numthreads(GROUP_SIZE, 1, 1)]
+ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
+@@ -70,7 +76,17 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
+     float4 vertexColor;
+     if (fogIndex > 0) {
+         const RSPFog rspFog = rspFogVector[fogIndex - 1];
++#ifdef RT64_VR_SHADERS
++        float fogW = tfPos.w;
++        const float2 remap = viewProjFogRemaps[viewProjIndex];
++        // The existing geometry singularity guard below must also protect newly visible fog
++        // vertices exactly on the eye plane. The game-near/flat identity path stays untouched.
++        if (((remap.x != 1.0f) || (remap.y != 0.0f)) && (fogW == 0.0f)) fogW = 1e-6f;
++        const float fogZ = projectionFogZ(tfPos.z, fogW, remap.x, remap.y);
++        const float fogAlpha = ((max(fogZ, 0) / fogW) * rspFog.mul + rspFog.offset);
++#else
+         const float fogAlpha = ((max(tfPos.z, 0) / tfPos.w) * rspFog.mul + rspFog.offset);
++#endif
+         vertexColor.a = clamp(fogAlpha / 255.0f, 0.0f, 1.0f);
+     }
+     else {
+@@ -131,4 +147,4 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
+     dstPos[vertexOffsetIndex] = screenPos;
+     dstTc[vertexOffsetIndex] = tc;
+     dstCol[vertexOffsetIndex] = vertexColor;
+-}
+\ No newline at end of file
++}
+diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
+index e7895c3..a59db37 100644
+--- a/src/shaders/RasterPS.hlsl
++++ b/src/shaders/RasterPS.hlsl
+@@ -11,6 +11,9 @@
+ #include "Library.hlsli"
+ #include "Random.hlsli"
+ #include "TextureSampler.hlsli"
++#ifdef RT64_VR_SHADERS
++#include "shared/rt64_projection_fog.h"
++#endif
+ 
+ [[vk::push_constant]] ConstantBuffer<RasterParams> gConstants : register(b0, space0);
+ 
+@@ -69,11 +72,21 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+     // This max range was determined by using a test ROM against an LLE implementation.
+     // FIXME: This should be turned off for non-F3D microcodes.
+     const bool simulateDepthClipF3D = true;
++#ifdef RT64_VR_SHADERS
++    const float gameMaxDepth = simulateDepthClipF3D && !renderFlagRect(rp.flags) && !zSourcePrim ? (1022.0f / 1024.0f) : 1.0f;
++    const float MaxDepth = projectionEyeDepth(gameMaxDepth, gConstants.vrDepthRemap.x, gConstants.vrDepthRemap.y);
++#else
+     const float MaxDepth = simulateDepthClipF3D && !renderFlagRect(rp.flags) && !zSourcePrim ? (1022.0f / 1024.0f) : 1.0f;
++#endif
+     
+     // FIXME: This can be implemented by checking feature support for the API and embedding the depth bounds into the pipeline.
+     const bool pipelineDepthBounds = false;
+     
++#if defined(RT64_VR_SHADERS) && defined(SPEC_CONSTANT_RENDER_PARAMS)
++    // VR: the vertex shader clips above the maximum depth (a clip distance) and the pipeline's
++    // depth clip or clamp does the rest, so opaque draws carry no discard and keep early depth
++    // testing on tiling GPUs.
++#else
+     // Handle no-nearclipping by clamping the minimum depth and manually clipping above the maximum.
+     if (depthClampNear) {
+         // Since depth clip is disabled on the PSO so near clip can be ignored, we manually clip any values above the allowed depth.
+@@ -87,6 +100,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+             return false;
+         }
+     }
++#endif
+ 
+     if (depthDecal) {
+         // Sample the depth buffer for this pixel to compare for the decal check.
+@@ -98,13 +112,24 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+         float dz;
+         if (zSourcePrim) {
+             dz = instanceRDPParams[instanceIndex].primDepth.y;
++#ifdef RT64_VR_SHADERS
++            dz /= abs(gConstants.vrDepthRemap.x);
++#endif
+         }
+         else {
+             dz = (abs(ddx(vertexPosition.z)) + abs(ddy(vertexPosition.z))) * FbParams.resolutionScale.y;
+         }
+ 
+         // Perform the decal depth tolerance check.
++#ifdef RT64_VR_SHADERS
++        // Newly visible geometry can be inside the game's old near. Its emulated fixed-depth
++        // tolerance uses the nearest representable N64 depth, not a negative float-to-uint.
++        const float gameSurfaceDepth = saturate(projectionGameDepth(surfaceDepth, gConstants.vrDepthRemap.x, gConstants.vrDepthRemap.y));
++        const float coplanarTolerance = CoplanarDepthTolerance(gameSurfaceDepth) / abs(gConstants.vrDepthRemap.x);
++        const float DepthTolerance = max(coplanarTolerance, dz);
++#else
+         const float DepthTolerance = max(CoplanarDepthTolerance(surfaceDepth), dz);
++#endif
+         const float pixelDepth = select(depthClampNear, max(vertexPosition.z, 0.0f), vertexPosition.z);
+         if (abs(pixelDepth - surfaceDepth) > DepthTolerance) {
+             return false;
+@@ -310,4 +335,4 @@ void PSMain(
+     pixelColor = resultColor;
+     pixelAlpha = resultAlpha;
+ }
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/src/shaders/RasterVS.hlsl b/src/shaders/RasterVS.hlsl
+index 74b1fa0..31a4ab4 100644
+--- a/src/shaders/RasterVS.hlsl
++++ b/src/shaders/RasterVS.hlsl
+@@ -8,6 +8,9 @@
+ 
+ #include "FbRendererCommon.hlsli"
+ #include "Library.hlsli"
++#ifdef RT64_VR_SHADERS
++#include "shared/rt64_projection_fog.h"
++#endif
+ 
+ [[vk::push_constant]] ConstantBuffer<RasterParams> gConstants : register(b0, space0);
+ 
+@@ -30,7 +33,12 @@ LIBRARY_EXPORT void RasterVS(const RenderParams rp, in float4 iPosition, in floa
+     const bool zSourcePrim = (otherMode.zSource() == G_ZS_PRIM);
+     if (!copyMode && zSourcePrim) {
+         const uint instanceIndex = instanceRenderIndices[gConstants.renderIndex].instanceIndex;
++#ifdef RT64_VR_SHADERS
++        const float depth = projectionEyeDepth(instanceRDPParams[instanceIndex].primDepth.x, gConstants.vrDepthRemap.x, gConstants.vrDepthRemap.y);
++        ndcPos.z = depth * ndcPos.w;
++#else
+         ndcPos.z = instanceRDPParams[instanceIndex].primDepth.x * ndcPos.w;
++#endif
+     }
+ 
+     oPosition = ndcPos;
+@@ -59,11 +67,24 @@ void VSMain(
+ #if defined(DYNAMIC_RENDER_PARAMS) || defined(VERTEX_FLAT_COLOR)
+     , out float4 oFlatColor : COLOR1
+ #endif
++#if defined(RT64_VR_SHADERS) && defined(SPEC_CONSTANT_RENDER_PARAMS)
++    , out float oClipDistance : SV_ClipDistance0
++#endif
+ )
+ {
+ #if !defined(DYNAMIC_RENDER_PARAMS) && !defined(VERTEX_FLAT_COLOR)
+     float4 oFlatColor;
+ #endif
+-    RasterVS(getRenderParams(), iPosition, iUV, iColor, oPosition, oUV, oSmoothColor, oFlatColor);
++    const RenderParams rp = getRenderParams();
++    RasterVS(rp, iPosition, iUV, iColor, oPosition, oUV, oSmoothColor, oFlatColor);
++#if defined(RT64_VR_SHADERS) && defined(SPEC_CONSTANT_RENDER_PARAMS)
++    // The pixel shader's F3D far clip (RasterPS.hlsl) as a clip plane: z/w <= MaxDepth. The
++    // pipeline clips below zero (or clamps for no-nearclipping draws).
++    const OtherMode otherMode = { rp.omL, rp.omH };
++    const bool zSourcePrim = (otherMode.zSource() == G_ZS_PRIM);
++    const float gameMaxDepth = (!renderFlagRect(rp.flags) && !zSourcePrim) ? (1022.0f / 1024.0f) : 1.0f;
++    const float MaxDepth = projectionEyeDepth(gameMaxDepth, gConstants.vrDepthRemap.x, gConstants.vrDepthRemap.y);
++    oClipDistance = MaxDepth * oPosition.w - oPosition.z;
++#endif
+ }
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/src/shaders/TextureSampler.hlsli b/src/shaders/TextureSampler.hlsli
+index 1ceb2ce..c4648b9 100644
+--- a/src/shaders/TextureSampler.hlsli
++++ b/src/shaders/TextureSampler.hlsli
+@@ -12,6 +12,15 @@
+ #include "shared/rt64_render_flags.h"
+ #include "shared/rt64_render_params.h"
+ 
++// VR builds, specialized shaders: a draw that doesn't pick its tiles per pixel (LOD) reads the same
++// texture in every pixel, so its texture index needs no non-uniform access. On Adreno a
++// non-uniform sample costs several times a uniform one, and this sampler takes up to 16 per pixel.
++#if defined(RT64_VR_SHADERS) && defined(SPEC_CONSTANT_RENDER_PARAMS)
++#define UNIFORM_TEXTURE_INDEX 1
++#else
++#define UNIFORM_TEXTURE_INDEX 0
++#endif
++
+ #define SIMULATE_LOW_PRECISION 1
+ #define FIX_UPSCALING_PRECISION 1
+ 
+@@ -71,7 +80,7 @@ void computeLOD(OtherMode otherMode, uint rdpTileCount, float2 primLOD, float re
+     }
+ }
+ 
+-float4 clampWrapMirrorSample(const RDPTile rdpTile, const GPUTile gpuTile, float2 tcScale, int2 texelInt, uint tlut, bool gpuTileUsesTMEM, uint mipLevel) {
++float4 clampWrapMirrorSample(const RDPTile rdpTile, const GPUTile gpuTile, float2 tcScale, int2 texelInt, uint tlut, bool gpuTileUsesTMEM, uint mipLevel, bool uniformIndex) {
+     if (rdpTile.cms & G_TX_CLAMP) {
+         texelInt.x = clamp(texelInt.x, 0, (round(tcScale.x * rdpTile.lrs) / 4) - (round(tcScale.x * rdpTile.uls) / 4) + round(tcScale.x - 1.0f));
+     }
+@@ -101,10 +110,20 @@ float4 clampWrapMirrorSample(const RDPTile rdpTile, const GPUTile gpuTile, float
+ 
+     // Check if tile requires TMEM decoding and sample using dynamic decoding.
+     if (gpuTileUsesTMEM) {
++#if UNIFORM_TEXTURE_INDEX
++        if (uniformIndex) {
++            return sampleTMEM(texelInt, rdpTile.siz, rdpTile.fmt, rdpTile.address, rdpTile.stride, tlut, rdpTile.palette, gTMEM[gpuTile.textureIndex]);
++        }
++#endif
+         return sampleTMEM(texelInt, rdpTile.siz, rdpTile.fmt, rdpTile.address, rdpTile.stride, tlut, rdpTile.palette, gTMEM[NonUniformResourceIndex(gpuTile.textureIndex)]);
+     }
+     // Sample the color version directly.
+     else {
++#if UNIFORM_TEXTURE_INDEX
++        if (uniformIndex) {
++            return gTextures[gpuTile.textureIndex].Load(int3(texelInt, mipLevel));
++        }
++#endif
+         return gTextures[NonUniformResourceIndex(gpuTile.textureIndex)].Load(int3(texelInt, mipLevel));
+     }
+ }
+@@ -139,7 +158,16 @@ float4 sampleTextureNative(Texture2D texture, uint nativeSampler, int2 texelBase
+     }
+ }
+ 
+-float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool filterBilerp, bool filterAverage, bool linearFiltering, float2 uvCoord, uint tlut, bool canDecodeTMEM, uint mipLevel, bool usesHDR) {
++float4 sampleTextureNativeIndexed(uint textureIndex, bool uniformIndex, uint nativeSampler, int2 texelBaseInt, float2 textureSize) {
++#if UNIFORM_TEXTURE_INDEX
++    if (uniformIndex) {
++        return sampleTextureNative(gTextures[textureIndex], nativeSampler, texelBaseInt, textureSize);
++    }
++#endif
++    return sampleTextureNative(gTextures[NonUniformResourceIndex(textureIndex)], nativeSampler, texelBaseInt, textureSize);
++}
++
++float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool filterBilerp, bool filterAverage, bool linearFiltering, float2 uvCoord, uint tlut, bool canDecodeTMEM, uint mipLevel, bool usesHDR, bool uniformIndex) {
+     float2 tcScale = gpuTile.tcScale;
+     float mipScale = float(1U << mipLevel);
+     uvCoord /= mipScale;
+@@ -155,33 +183,32 @@ float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool fil
+         int numSamples = select_uint(filtering, 4, 1);
+         [unroll]
+         for (int i = 0; i < numSamples; i++) {
+-            samples[i] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(i >> 1, i & 1), tlut, gpuTileUsesTMEM, mipLevel);
++            samples[i] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(i >> 1, i & 1), tlut, gpuTileUsesTMEM, mipLevel, uniformIndex);
+         }
+ #else
+-        samples[0] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt, tlut, gpuTileUsesTMEM, mipLevel);
++        samples[0] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt, tlut, gpuTileUsesTMEM, mipLevel, uniformIndex);
+         
+         if (filtering) {
+-            samples[1] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(0, 1), tlut, gpuTileUsesTMEM, mipLevel);
+-            samples[2] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(1, 0), tlut, gpuTileUsesTMEM, mipLevel);
+-            samples[3] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(1, 1), tlut, gpuTileUsesTMEM, mipLevel);
++            samples[1] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(0, 1), tlut, gpuTileUsesTMEM, mipLevel, uniformIndex);
++            samples[2] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(1, 0), tlut, gpuTileUsesTMEM, mipLevel, uniformIndex);
++            samples[3] = clampWrapMirrorSample(rdpTile, gpuTile, tcScale, texelBaseInt + int2(1, 1), tlut, gpuTileUsesTMEM, mipLevel, uniformIndex);
+         }
+ #endif
+     }
+     else {
+-        Texture2D texture = gTextures[NonUniformResourceIndex(gpuTile.textureIndex)];
+ #if USE_FOR_LOOPS
+         int numSamples = select_uint(filtering, 4, 1);
+         [unroll]
+         for (int i = 0; i < numSamples; i++) {
+-            samples[i] = sampleTextureNative(texture, nativeSampler, texelBaseInt + int2(i >> 1, i & 1), gpuTile.textureDimensions.xy);
++            samples[i] = sampleTextureNativeIndexed(gpuTile.textureIndex, uniformIndex, nativeSampler, texelBaseInt + int2(i >> 1, i & 1), gpuTile.textureDimensions.xy);
+         }
+ #else
+-        samples[0] = sampleTextureNative(texture, nativeSampler, texelBaseInt, gpuTile.textureDimensions.xy);
++        samples[0] = sampleTextureNativeIndexed(gpuTile.textureIndex, uniformIndex, nativeSampler, texelBaseInt, gpuTile.textureDimensions.xy);
+         
+         if (filtering) {
+-            samples[1] = sampleTextureNative(texture, nativeSampler, texelBaseInt + int2(0, 1), gpuTile.textureDimensions.xy);
+-            samples[2] = sampleTextureNative(texture, nativeSampler, texelBaseInt + int2(1, 0), gpuTile.textureDimensions.xy);
+-            samples[3] = sampleTextureNative(texture, nativeSampler, texelBaseInt + int2(1, 1), gpuTile.textureDimensions.xy);
++            samples[1] = sampleTextureNativeIndexed(gpuTile.textureIndex, uniformIndex, nativeSampler, texelBaseInt + int2(0, 1), gpuTile.textureDimensions.xy);
++            samples[2] = sampleTextureNativeIndexed(gpuTile.textureIndex, uniformIndex, nativeSampler, texelBaseInt + int2(1, 0), gpuTile.textureDimensions.xy);
++            samples[3] = sampleTextureNativeIndexed(gpuTile.textureIndex, uniformIndex, nativeSampler, texelBaseInt + int2(1, 1), gpuTile.textureDimensions.xy);
+         }
+ #endif
+     }
+@@ -214,7 +241,31 @@ float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool fil
+     }
+ }
+ 
+-float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputUV, float2 ddxUV, float2 ddyUV, const RDPTile rdpTile, const GPUTile gpuTile, bool nextPixelBug) {
++float4 sampleTextureNativeGrad(Texture2D texture, uint nativeSampler, float2 nativeUVCoord, float2 ddxUVNorm, float2 ddyUVNorm) {
++    switch (nativeSampler) {
++        case NATIVE_SAMPLER_WRAP_WRAP:
++            return texture.SampleGrad(gLinearWrapWrapSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
++        case NATIVE_SAMPLER_WRAP_MIRROR:
++            return texture.SampleGrad(gLinearWrapMirrorSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
++        case NATIVE_SAMPLER_WRAP_CLAMP:
++            return texture.SampleGrad(gLinearWrapClampSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
++        case NATIVE_SAMPLER_MIRROR_WRAP:
++            return texture.SampleGrad(gLinearMirrorWrapSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
++        case NATIVE_SAMPLER_MIRROR_MIRROR:
++            return texture.SampleGrad(gLinearMirrorMirrorSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
++        case NATIVE_SAMPLER_MIRROR_CLAMP:
++            return texture.SampleGrad(gLinearMirrorClampSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
++        case NATIVE_SAMPLER_CLAMP_WRAP:
++            return texture.SampleGrad(gLinearClampWrapSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
++        case NATIVE_SAMPLER_CLAMP_MIRROR:
++            return texture.SampleGrad(gLinearClampMirrorSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
++        case NATIVE_SAMPLER_CLAMP_CLAMP:
++        default:
++            return texture.SampleGrad(gLinearClampClampSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
++    }
++}
++
++float4 sampleTextureTile(OtherMode otherMode, RenderFlags renderFlags, float2 inputUV, float2 ddxUV, float2 ddyUV, const RDPTile rdpTile, const GPUTile gpuTile, bool nextPixelBug, bool uniformIndex) {
+     const bool texturePerspective = (otherMode.textPersp() == G_TP_PERSP);
+     const bool applyCorrection = (!texturePerspective && !renderFlagRect(renderFlags));
+ 
+@@ -272,8 +323,6 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
+ 
+     // Determine the RDP sample count and mip levels.
+     if (flagHasMipmaps) {
+-        // Retrieve the dimensions of the texture for either type of sampler.
+-        Texture2D texture = gTextures[NonUniformResourceIndex(gpuTile.textureIndex)];
+         if (nativeSampler == NATIVE_SAMPLER_NONE) {
+             float2 ddxUVScaled = ddxUV * gpuTile.tcScale;
+             float2 ddyUVScaled = ddyUV * gpuTile.tcScale;
+@@ -293,27 +342,12 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
+             float2 ddyUVNorm = ddyUV / originalSize;
+             
+             // Choose the native sampler that was determined to be compatible.
+-            switch (nativeSampler) {
+-                case NATIVE_SAMPLER_WRAP_WRAP:
+-                    return texture.SampleGrad(gLinearWrapWrapSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
+-                case NATIVE_SAMPLER_WRAP_MIRROR:
+-                    return texture.SampleGrad(gLinearWrapMirrorSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
+-                case NATIVE_SAMPLER_WRAP_CLAMP:
+-                    return texture.SampleGrad(gLinearWrapClampSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
+-                case NATIVE_SAMPLER_MIRROR_WRAP:
+-                    return texture.SampleGrad(gLinearMirrorWrapSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
+-                case NATIVE_SAMPLER_MIRROR_MIRROR:
+-                    return texture.SampleGrad(gLinearMirrorMirrorSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
+-                case NATIVE_SAMPLER_MIRROR_CLAMP:
+-                    return texture.SampleGrad(gLinearMirrorClampSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
+-                case NATIVE_SAMPLER_CLAMP_WRAP:
+-                    return texture.SampleGrad(gLinearClampWrapSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
+-                case NATIVE_SAMPLER_CLAMP_MIRROR:
+-                    return texture.SampleGrad(gLinearClampMirrorSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
+-                case NATIVE_SAMPLER_CLAMP_CLAMP:
+-                default:
+-                    return texture.SampleGrad(gLinearClampClampSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
++#if UNIFORM_TEXTURE_INDEX
++            if (uniformIndex) {
++                return sampleTextureNativeGrad(gTextures[gpuTile.textureIndex], nativeSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
+             }
++#endif
++            return sampleTextureNativeGrad(gTextures[NonUniformResourceIndex(gpuTile.textureIndex)], nativeSampler, nativeUVCoord, ddxUVNorm, ddyUVNorm);
+         }
+     }
+     else {
+@@ -326,13 +360,13 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
+ #if USE_FOR_LOOPS
+     [unroll]
+     for (uint i = 0; i < numRDPSamples; i++) {
+-        textureSamples[i] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[i], usesHDR);
++        textureSamples[i] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[i], usesHDR, uniformIndex);
+     }
+ #else
+-    textureSamples[0] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[0], usesHDR);
++    textureSamples[0] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[0], usesHDR, uniformIndex);
+     
+     if (numRDPSamples > 1) {
+-        textureSamples[1] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[1], usesHDR);
++        textureSamples[1] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[1], usesHDR, uniformIndex);
+     }
+ #endif
+ 
+@@ -356,4 +390,19 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
+     }
+     
+     return textureColor;
+-}
+\ No newline at end of file
++}
++
++float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputUV, float2 ddxUV, float2 ddyUV, const RDPTile rdpTile, const GPUTile gpuTile, bool nextPixelBug) {
++    // Without LOD every pixel of the draw reads the same tiles (UNIFORM_TEXTURE_INDEX).
++    const bool uniformIndex = UNIFORM_TEXTURE_INDEX && (otherMode.textLOD() != G_TL_LOD);
++#if UNIFORM_TEXTURE_INDEX
++    // With LOD each pixel picks its tile, but whole waves usually pick the same one: those read it
++    // through the wave's first lane, which the compiler knows to be uniform.
++    if (!uniformIndex && WaveActiveAllEqual(gpuTile.textureIndex)) {
++        GPUTile waveTile = gpuTile;
++        waveTile.textureIndex = WaveReadLaneFirst(gpuTile.textureIndex);
++        return sampleTextureTile(otherMode, renderFlags, inputUV, ddxUV, ddyUV, rdpTile, waveTile, nextPixelBug, true);
++    }
++#endif
++    return sampleTextureTile(otherMode, renderFlags, inputUV, ddxUV, ddyUV, rdpTile, gpuTile, nextPixelBug, uniformIndex);
++}
+diff --git a/src/shaders/VrEyeCopyPS.hlsl b/src/shaders/VrEyeCopyPS.hlsl
+new file mode 100644
+index 0000000..10ce152
+--- /dev/null
++++ b/src/shaders/VrEyeCopyPS.hlsl
+@@ -0,0 +1,14 @@
++//
++// RT64
++//
++// VR eye copy (rt64_vr.h): the finished eye image drawn 1:1 into the host's swapchain image
++// through a view of the same encoding, so the bits are copied unchanged. On Adreno a draw is
++// several times cheaper than vkCmdCopyImage between the two images (UNORM to sRGB, both
++// compressed). Compiled only with RT64_VR.
++//
++
++Texture2D<float4> gSource : register(t1);
++
++float4 PSMain(in float4 pos : SV_Position) : SV_TARGET {
++    return gSource.Load(int3(int2(pos.xy), 0));
++}
+diff --git a/src/shaders/VrHudSolvePS.hlsl b/src/shaders/VrHudSolvePS.hlsl
+new file mode 100644
+index 0000000..b832185
+--- /dev/null
++++ b/src/shaders/VrHudSolvePS.hlsl
+@@ -0,0 +1,31 @@
++//
++// RT64
++//
++// VR HUD: the HUD drawn once over black and once over white gives, per pixel, the colour the
++// game blended (b = a * c) and its coverage (w - b = 1 - a) without trusting the framebuffer's
++// alpha, which N64 games use as scratch. The output is unpremultiplied (c, a) in the targets'
++// own (gamma) encoding, for a quad layer composited with source alpha.
++//
++
++struct VrHudSolveCB {
++    uint2 size;
++    uint debugSplit;  // diagnostics: left half the black render, right half the white one
++};
++
++[[vk::push_constant]] ConstantBuffer<VrHudSolveCB> gConstants : register(b0);
++
++Texture2D<float4> gBlack : register(t1);
++Texture2D<float4> gWhite : register(t2);
++
++float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
++    uint2 pixelPos = min(uint2(uv * float2(gConstants.size)), gConstants.size - uint2(1, 1));
++    float3 b = gBlack.Load(uint3(pixelPos, 0)).rgb;
++    float3 w = gWhite.Load(uint3(pixelPos, 0)).rgb;
++    if (gConstants.debugSplit != 0) {
++        return float4((uv.x < 0.5f) ? b : w, 1.0f);
++    }
++
++    float a = saturate(1.0f - dot(w - b, float3(1.0f, 1.0f, 1.0f) / 3.0f));
++    float3 c = (a > (1.0f / 255.0f)) ? saturate(b / a) : float3(0.0f, 0.0f, 0.0f);
++    return float4(c, a);
++}
+diff --git a/src/shaders/VrMaskPS.hlsl b/src/shaders/VrMaskPS.hlsl
+new file mode 100644
+index 0000000..1b42771
+--- /dev/null
++++ b/src/shaders/VrMaskPS.hlsl
+@@ -0,0 +1,9 @@
++//
++// RT64
++//
++// VR hidden-area mask: black where the lenses show nothing. Compiled only with RT64_VR.
++//
++
++float4 PSMain() : SV_TARGET {
++    return float4(0.0f, 0.0f, 0.0f, 1.0f);
++}
+diff --git a/src/shaders/VrMaskVS.hlsl b/src/shaders/VrMaskVS.hlsl
+new file mode 100644
+index 0000000..2f19838
+--- /dev/null
++++ b/src/shaders/VrMaskVS.hlsl
+@@ -0,0 +1,11 @@
++//
++// RT64
++//
++// VR hidden-area mask (rt64_vr.h, hiddenMesh): the headset's hidden triangles, already in
++// normalized device coordinates, drawn at the near plane before the eye's scene so that every
++// depth-tested draw skips those pixels. Compiled only with RT64_VR.
++//
++
++void VSMain(in float2 iPosition : POSITION, out float4 oPosition : SV_Position) {
++    oPosition = float4(iPosition, 0.0f, 1.0f);
++}
+diff --git a/src/shared/rt64_projection_fog.h b/src/shared/rt64_projection_fog.h
+new file mode 100644
+index 0000000..664e9d0
+--- /dev/null
++++ b/src/shared/rt64_projection_fog.h
+@@ -0,0 +1,50 @@
++// The same depth conversion is used by the projection processor, RSP shader and host tests.
++#pragma once
++
++#ifdef __cplusplus
++#include <cmath>
++namespace RT64 {
++    struct ProjectionFogRemap { float a = 1.0f, b = 0.0f; };
++
++    // Row-major standard perspective: z/w = A + B/d, with A=m22/m23, B=-m32/m23.
++    // Coefficients are computed in double from the actual interpolated float matrices.
++    inline ProjectionFogRemap projectionFogRemap(const float *game, const float *eye) {
++        if ((game[10] == eye[10]) && (game[11] == eye[11]) && (game[14] == eye[14]) && (game[15] == eye[15])) {
++            return {};
++        }
++        if ((game[15] != 0.0f) || (eye[15] != 0.0f) || (std::fabs(game[11]) < 1e-12f) || (std::fabs(eye[11]) < 1e-12f)) {
++            return {};
++        }
++        const double ga = double(game[10]) / game[11], gb = -double(game[14]) / game[11];
++        const double ea = double(eye[10]) / eye[11], eb = -double(eye[14]) / eye[11];
++        if (std::fabs(eb) < 1e-12) return {};
++        const double a = gb / eb;
++        return { float(a), float(ga - a * ea) };
++    }
++
++    inline ProjectionFogRemap projectionScreenRemap(float a, float b, float viewportScale, float viewportTranslate) {
++        return { a, float(double(viewportScale) * b + (1.0 - double(a)) * viewportTranslate) };
++    }
++
++    inline
++#endif
++    float projectionFogZ(float z, float w, float a, float b) {
++        // Remap BEFORE max(z,0)/w: newly visible geometry inside the game's near must retain
++        // the game's zero-clamped fog, not the fog of the eye near plane. Preserve identity bits.
++        return ((a == 1.0f) && (b == 0.0f)) ? z : (z * a + w * b);
++    }
++#ifdef __cplusplus
++    inline
++#endif
++    float projectionEyeDepth(float gameDepth, float a, float b) {
++        return ((a == 1.0f) && (b == 0.0f)) ? gameDepth : ((gameDepth - b) / a);
++    }
++#ifdef __cplusplus
++    inline
++#endif
++    float projectionGameDepth(float eyeDepth, float a, float b) {
++        return ((a == 1.0f) && (b == 0.0f)) ? eyeDepth : (eyeDepth * a + b);
++    }
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/shared/rt64_raster_params.h b/src/shared/rt64_raster_params.h
+index 0a5c332..afab9bd 100644
+--- a/src/shared/rt64_raster_params.h
++++ b/src/shared/rt64_raster_params.h
+@@ -14,7 +14,11 @@ namespace interop {
+         uint3 padding;
+         float2 screenScale;
+         float2 screenOffset;
++#if (defined(HLSL_CPU) && RT64_VR) || defined(RT64_VR_SHADERS)
++        // game screen depth = a * eye screen depth + b. Identity for flat/raw/2D calls.
++        float2 vrDepthRemap;
++#endif
+     };
+ #ifdef HLSL_CPU
+ };
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/src/shared/rt64_vr_billboard.h b/src/shared/rt64_vr_billboard.h
+new file mode 100644
+index 0000000..da6cfc8
+--- /dev/null
++++ b/src/shared/rt64_vr_billboard.h
+@@ -0,0 +1,166 @@
++// Camera-facing billboards in VR eye passes. A game builds a billboard's model matrix from its own
++// camera, so in the headset it faces the flat game camera and turns edge-on away from the centre of
++// the game's view. The eye pass rebuilds the rotation of the model matrices the host names (by
++// matrix group) to face a viewpoint instead. Shared by the transform processor and host tests.
++#pragma once
++
++#include <cmath>
++#include <cstdint>
++
++namespace RT64 {
++    enum class VrBillboardMode : uint32_t {
++        None = 0,
++        // Turns about the world's up axis (+Y) only and stays upright: upright sprites (props,
++        // collectibles, trees).
++        Cylindrical = 1,
++        // Faces the viewpoint completely: particles and effects.
++        Spherical = 2,
++        // As the game built it: cylindrical when the game kept it upright (no pitch), else
++        // spherical.
++        Matching = 3
++    };
++
++    // Model matrices in matrix groups firstId..lastId (inclusive) are billboards of this mode.
++    struct VrBillboardGroup {
++        uint32_t firstId = 0;
++        uint32_t lastId = 0;
++        VrBillboardMode mode = VrBillboardMode::None;
++    };
++
++    inline VrBillboardMode vrBillboardMode(const VrBillboardGroup *groups, uint32_t groupCount, uint32_t matrixId) {
++        for (uint32_t i = 0; i < groupCount; i++) {
++            if ((matrixId >= groups[i].firstId) && (matrixId <= groups[i].lastId)) {
++                return groups[i].mode;
++            }
++        }
++
++        return VrBillboardMode::None;
++    }
++
++    // m: a model (world) matrix, row-major 4x4 in RT64's row-vector convention: rows 0-2 are the
++    // local X, Y, Z axes in world space, row 3 the position. A billboard is a quad in its local XY
++    // plane whose local +Z the game pointed at its camera, its local X kept level (yaw and pitch,
++    // no roll).
++    //
++    // The game's camera basis C is recovered from the matrix itself (Z = the row-2 direction,
++    // X = level, Y = Z x X), so what the game added on top of it, L = R * C^T (the sprite's own
++    // roll, scale and mirroring), is kept, and only C is replaced by a basis facing `viewpoint`:
++    // R' = L * E. It turns about `pivot` (local coordinates; the origin when null): that point
++    // keeps its world position. Games often turn a billboard about a point away from its origin
++    // (a map model's billboard nodes: the node's centre in map coordinates).
++    // A flat billboard (row 2 zero: a zero Z scale) takes Z from row 0 x row 1, on the side of
++    // `gameViewpoint` (the game camera's position; `viewpoint` when null).
++    // Returns false and leaves m unchanged when the matrix or the viewpoint is degenerate.
++    inline bool vrFaceBillboard(float m[16], const float viewpoint[3], VrBillboardMode mode, const float *gameViewpoint = nullptr, const float *pivot = nullptr) {
++        if (mode == VrBillboardMode::None) {
++            return false;
++        }
++
++        struct V {
++            double x, y, z;
++        };
++
++        auto dot = [](const V &a, const V &b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
++        auto cross = [](const V &a, const V &b) { return V{ a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x }; };
++        auto normalize = [&](V &a, double minLength) {
++            const double l = std::sqrt(dot(a, a));
++            if (!(l > minLength)) {
++                return false;
++            }
++
++            a = V{ a.x / l, a.y / l, a.z / l };
++            return true;
++        };
++
++        const V up = { 0.0, 1.0, 0.0 };
++        const V r[3] = {
++            { m[0], m[1], m[2] },
++            { m[4], m[5], m[6] },
++            { m[8], m[9], m[10] }
++        };
++
++        const V p = { m[12], m[13], m[14] };
++
++        // The pivot, local (c) and in world space (P = c * R + p): the billboard faces from P.
++        const V c = (pivot != nullptr) ? V{ pivot[0], pivot[1], pivot[2] } : V{ 0.0, 0.0, 0.0 };
++        const V pivotWorld = {
++            c.x * r[0].x + c.y * r[1].x + c.z * r[2].x + p.x,
++            c.x * r[0].y + c.y * r[1].y + c.z * r[2].y + p.y,
++            c.x * r[0].z + c.y * r[1].z + c.z * r[2].z + p.z };
++
++        // The game camera's basis, as the billboard was built.
++        V cBack = r[2];
++        if (!normalize(cBack, 1e-12)) {
++            cBack = cross(r[0], r[1]);
++            if (!normalize(cBack, 1e-12)) {
++                return false;
++            }
++
++            const float *side = (gameViewpoint != nullptr) ? gameViewpoint : viewpoint;
++            const V toSide = { double(side[0]) - pivotWorld.x, double(side[1]) - pivotWorld.y, double(side[2]) - pivotWorld.z };
++            if (dot(cBack, toSide) < 0.0) {
++                cBack = V{ -cBack.x, -cBack.y, -cBack.z };
++            }
++        }
++
++        V cRight = cross(up, cBack);
++        if (!normalize(cRight, 1e-6)) {
++            // Built looking straight up or down: no level axis to recover.
++            return false;
++        }
++
++        const V cUp = cross(cBack, cRight);
++        if (mode == VrBillboardMode::Matching) {
++            mode = (cUp.y > 0.99999) ? VrBillboardMode::Cylindrical : VrBillboardMode::Spherical;
++        }
++
++        // The facing basis.
++        V d = { double(viewpoint[0]) - pivotWorld.x, double(viewpoint[1]) - pivotWorld.y, double(viewpoint[2]) - pivotWorld.z };
++        V eBack, eRight, eUp;
++        if (mode == VrBillboardMode::Cylindrical) {
++            d.y = 0.0;
++            eBack = d;
++            if (!normalize(eBack, 1e-6)) {
++                return false;
++            }
++
++            eRight = cross(up, eBack);
++            eUp = up;
++        }
++        else {
++            eBack = d;
++            if (!normalize(eBack, 1e-6)) {
++                return false;
++            }
++
++            eRight = cross(up, eBack);
++            if (!normalize(eRight, 1e-4)) {
++                // The viewpoint straight above or below: keep the game's level axis.
++                eRight = V{ cRight.x - eBack.x * dot(cRight, eBack), cRight.y - eBack.y * dot(cRight, eBack), cRight.z - eBack.z * dot(cRight, eBack) };
++                if (!normalize(eRight, 1e-6)) {
++                    return false;
++                }
++            }
++
++            eUp = cross(eBack, eRight);
++        }
++
++        // The new rows, and the position that keeps P in place.
++        V n[3];
++        for (int i = 0; i < 3; i++) {
++            const double lr = dot(r[i], cRight), lu = dot(r[i], cUp), lb = dot(r[i], cBack);
++            n[i] = V{ lr * eRight.x + lu * eUp.x + lb * eBack.x, lr * eRight.y + lu * eUp.y + lb * eBack.y, lr * eRight.z + lu * eUp.z + lb * eBack.z };
++            m[i * 4 + 0] = float(n[i].x);
++            m[i * 4 + 1] = float(n[i].y);
++            m[i * 4 + 2] = float(n[i].z);
++        }
++
++        if (pivot != nullptr) {
++            m[12] = float(pivotWorld.x - (c.x * n[0].x + c.y * n[1].x + c.z * n[2].x));
++            m[13] = float(pivotWorld.y - (c.x * n[0].y + c.y * n[1].y + c.z * n[2].y));
++            m[14] = float(pivotWorld.z - (c.x * n[0].z + c.y * n[1].z + c.z * n[2].z));
++        }
++
++        return true;
++    }
++};

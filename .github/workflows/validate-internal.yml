@@ -7,6 +7,6 @@ on:
     types: [opened, synchronize]
 jobs:
   build:
-    if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
+    if: vars.RUN_LEGACY_VALIDATION == 'true' && (github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name)
     uses: ./.github/workflows/validate.yml
     secrets: inherit
