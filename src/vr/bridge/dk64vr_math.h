@@ -43,6 +43,14 @@ Quat quatConj(const Quat &q);
 Quat quatFromYaw(float radians);  // about +Y
 Quat quatNormalize(const Quat &q);
 Vec3 quatRotate(const Quat &q, const Vec3 &v);
+
+// The phosphor mask's constants for one eye (RT64::VrEyeOverlay, VrEyePhosphorPS.hlsl; docs 5e):
+// the eye's rotation in the room and its edge tangents, a triad `triadDeg` degrees of heading
+// wide with a scanline every 1.5 triads, at `strength` 0-1. The mask is a function of the
+// direction looked in, in the room, so both eyes get the same one.
+void phosphorOverlay(const Quat &eyeInRoom, const FovTangents &fov, uint32_t width, uint32_t height, float triadDeg, float strength, float out[20]);
+// What the shader multiplies light by in that direction (the same maths, for tests and previews).
+Vec3 phosphorMask(const Vec3 &roomDir, float triadDeg, float strength);
 float quatYaw(const Quat &q);  // heading about +Y of the rotated -Z axis
 Pose poseMul(const Pose &a, const Pose &b);  // b expressed in a's parent
 Pose poseInverse(const Pose &a);

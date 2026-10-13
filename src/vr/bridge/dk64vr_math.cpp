@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace dk64vr {
 
@@ -531,5 +532,46 @@ EyeSize eyeSize(uint32_t recommendedWidth, uint32_t recommendedHeight, uint32_t 
     r.height = size(recommendedHeight, maxHeight);
     return r;
 }
+
+namespace {
+// Light kept on average is about a third (half for the stripes, 0.675 for the scanlines), so
+// the mask is brightened; highlights clip, as a tube's do.
+const float PhosphorGain = 2.0f;
+const float PhosphorScanDepth = 0.65f;
+const float PhosphorScanPerTriad = 1.0f / 1.5f;
+}
+
+void phosphorOverlay(const Quat &eyeInRoom, const FovTangents &fov, uint32_t width, uint32_t height, float triadDeg, float strength, float out[20]) {
+    const Vec3 x = quatRotate(eyeInRoom, { 1.0f, 0.0f, 0.0f });
+    const Vec3 y = quatRotate(eyeInRoom, { 0.0f, 1.0f, 0.0f });
+    const Vec3 z = quatRotate(eyeInRoom, { 0.0f, 0.0f, 1.0f });
+    const float triadsPerRad = 180.0f / (3.1415926f * std::max(triadDeg, 0.01f));
+    const float v[20] = {
+        x.x, y.x, z.x, fov.left,
+        x.y, y.y, z.y, fov.right,
+        x.z, y.z, z.z, fov.up,
+        fov.down, triadsPerRad, triadsPerRad * PhosphorScanPerTriad, std::clamp(strength, 0.0f, 1.0f),
+        1.0f / float(std::max(width, 1U)), 1.0f / float(std::max(height, 1U)), PhosphorGain, PhosphorScanDepth
+    };
+    std::memcpy(out, v, sizeof(v));
+}
+
+Vec3 phosphorMask(const Vec3 &d, float triadDeg, float strength) {
+    const float triadsPerRad = 180.0f / (3.1415926f * std::max(triadDeg, 0.01f));
+    const float heading = std::atan2(d.x, -d.z);
+    const float height = d.y / std::sqrt(std::max(d.x * d.x + d.z * d.z, 1e-6f));
+    const float scan = 0.5f + 0.5f * std::cos(6.2831853f * height * triadsPerRad * PhosphorScanPerTriad);
+    const float rows = (1.0f + (scan - 1.0f) * PhosphorScanDepth) * PhosphorGain;
+    const float s = std::clamp(strength, 0.0f, 1.0f);
+    Vec3 out;
+    float *c[3] = { &out.x, &out.y, &out.z };
+    for (int i = 0; i < 3; i++) {
+        const float stripe = 0.5f + 0.5f * std::cos(6.2831853f * (heading * triadsPerRad - float(i) / 3.0f));
+        *c[i] = 1.0f + (stripe * rows - 1.0f) * s;
+    }
+
+    return out;
+}
+
 
 }

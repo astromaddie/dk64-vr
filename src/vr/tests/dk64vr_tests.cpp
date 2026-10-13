@@ -516,6 +516,51 @@ static const char *fakeEnv(const char *name) {
     return nullptr;
 }
 
+// Phosphor mask (docs 5e): a function of the room direction only, so two eyes with different
+// rotations and edges agree; off is the identity; the constants carry the rotation and edges.
+static void testPhosphor() {
+    using namespace dk64vr;
+    const Vec3 off = phosphorMask({ 0.3f, 0.1f, -1.0f }, 0.25f, 0.0f);
+    CHECK_NEAR(off.x, 1.0, 1e-6); CHECK_NEAR(off.y, 1.0, 1e-6); CHECK_NEAR(off.z, 1.0, 1e-6);
+
+    // The red stripe is brightest dead ahead; green a third of a triad on, blue two thirds.
+    const float third = 0.25f / 3.0f * 3.1415926f / 180.0f;
+    const Vec3 r = phosphorMask({ 0.0f, 0.0f, -1.0f }, 0.25f, 1.0f);
+    const Vec3 g = phosphorMask({ std::sin(third), 0.0f, -std::cos(third) }, 0.25f, 1.0f);
+    CHECK(r.x > r.y && r.x > r.z);
+    CHECK(g.y > g.x && g.y > g.z);
+    CHECK_NEAR(r.x, g.y, 1e-3);
+
+    // Light kept on average over heading and height: dimmer than the picture, not by half.
+    double sum = 0.0;
+    int count = 0;
+    for (int i = 0; i < 400; i++) {
+        for (int j = 0; j < 400; j++) {
+            const float a = float(i) * 1.0e-4f, h = float(j) * 1.3e-4f;
+            const Vec3 m = phosphorMask({ std::sin(a), h * std::cos(a) / std::cos(a), -std::cos(a) }, 0.25f, 1.0f);
+            sum += (m.x + m.y + m.z) / 3.0;
+            count++;
+        }
+    }
+    CHECK(sum / count > 0.55 && sum / count < 0.8);
+
+    // The constants: a pixel's direction through them is the eye's rotation of its tangent ray.
+    Quat q = quatFromYaw(0.7f);
+    FovTangents fov;
+    fov.left = -1.2f; fov.right = 0.9f; fov.up = 1.0f; fov.down = -1.1f;
+    float c[20];
+    phosphorOverlay(q, fov, 2000, 1000, 0.25f, 0.6f, c);
+    const float u = 0.25f, v = 0.75f;
+    const Vec3 eyeDir = { fov.left + (fov.right - fov.left) * u, fov.up + (fov.down - fov.up) * v, -1.0f };
+    const Vec3 want = quatRotate(q, eyeDir);
+    const Vec3 got = { c[0] * eyeDir.x + c[1] * eyeDir.y + c[2] * eyeDir.z, c[4] * eyeDir.x + c[5] * eyeDir.y + c[6] * eyeDir.z, c[8] * eyeDir.x + c[9] * eyeDir.y + c[10] * eyeDir.z };
+    CHECK_NEAR(got.x, want.x, 1e-5); CHECK_NEAR(got.y, want.y, 1e-5); CHECK_NEAR(got.z, want.z, 1e-5);
+    CHECK_NEAR(c[3], fov.left, 0.0); CHECK_NEAR(c[7], fov.right, 0.0); CHECK_NEAR(c[11], fov.up, 0.0); CHECK_NEAR(c[12], fov.down, 0.0);
+    CHECK_NEAR(c[15], 0.6, 1e-6);
+    CHECK_NEAR(c[16], 1.0 / 2000.0, 1e-9); CHECK_NEAR(c[17], 1.0 / 1000.0, 1e-9);
+    CHECK_NEAR(c[13], 180.0 / (3.1415926 * 0.25), 1e-2);
+}
+
 static void testSettings() {
     dk64vr_log_set_sink(captureLog);
     dk64vr_settings_t s;
@@ -544,6 +589,8 @@ static void testSettings() {
     CHECK_NEAR(dk64vr_settings_get(&s, "cutscenes"), 0.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "level_pitch"), 1.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "camera_auto_rotate"), 1.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "phosphor"), 0.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "phosphor_size"), 0.25, 1e-9);
     CHECK_NEAR(dk64vr_settings_get(&s, "foveation"), 3.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "foveation_eye_tracked"), 1.0, 0.0);
 
@@ -2740,6 +2787,7 @@ int main() {
     testSchedulerStall();
     testSchedulerWeightEdges();
     testSettings();
+    testPhosphor();
     testFoveation();
     testActionNamesUnique();
     testBindingPaths();

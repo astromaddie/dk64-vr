@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-13 — Phosphor mask
+
+- Added `phosphor` and `phosphor_size` (VR settings, Display: "CRT phosphors", "Phosphor size"): red, green and blue stripes and scanlines over the world, the same for both eyes. Off by default. Not yet run on the Frame.
+- The RT64 VR overlay patch and its pinned hash changed for the new eye shader.
+
 ## 2026-10-13 — Manual camera setting
 
 - Added `camera_auto_rotate` (VR settings, Comfort: "Automatic camera turning"). Off stops the game camera turning on its own in third-person play; its wall avoidance stays. Checked unattended in open DK Isles only, not worn.

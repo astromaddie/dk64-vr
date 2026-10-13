@@ -735,6 +735,19 @@ public:
         return chain.framebuffers[chain.index].get();
     }
 
+    bool eyeOverlay(uint32_t eye, RT64::VrEyeOverlay &overlay) override {
+        // Phosphor mask (docs 5e): the eyes that look into the world only, not the cinema's
+        // screen views.
+        const float strength = float(setting("phosphor"));
+        if ((strength <= 0.0f) || (eye > 1) || cinemaActive || (frameMode != RT64::VrFrame::Mode::Stereo)) {
+            return false;
+        }
+
+        static_assert(sizeof(RT64::VrEyeOverlay) == sizeof(float) * 20, "the mask's constants are 20 floats");
+        phosphorOverlay(eyeSubmitPose[eye].q, eyeFov[eye], eyeChain[eye].width, eyeChain[eye].height, float(setting("phosphor_size")), strength, overlay.room0);
+        return true;
+    }
+
     uint32_t hiddenMesh(uint32_t eye, const float **ndcXY) override {
         // Only for eye images that span the headset's FOV (not the cinema's screen views).
         static const bool enabled = envFlag("RT64_VR_HIDDEN_MASK", true);

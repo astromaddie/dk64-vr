@@ -265,6 +265,8 @@ AxA -> BxB (xS, target 2160, max ...)`.
 | `diag_camera_seconds` | 0 s | Camera motion without a wearer in stereo play, phases of N s: C-left tap, C-right tap, stick held forward-right, idle |
 | `diag_camera_log` | false | A `[vr-cam]` line every display frame: weight, linear and smoothed camera heading, pitch and position |
 | `diag_turn_stick` | 0 | Right stick X held at this deflection for 4 s, released for 4 s, in stereo play (a snap a hold, or the smooth orbit) |
+| `phosphor` | 0 | Phosphor mask strength 0-1 over the eye images (section 5e); 0 = the plain eye copy |
+| `phosphor_size` | 0.25 deg | Width of one red-green-blue triad, 0.15-1.0 degrees |
 | `camera_auto_rotate` | true | Off: the camera turns only when the wearer turns it; wall avoidance stays (section 5d) |
 | `right_stick_x` | `turn` | `turn`: comfort turn (`turn_mode`, `snap_angle`, `smooth_turn_speed`); `camera`: the game's own C-left/C-right camera swing |
 | `move_from_view` | true | Left stick relative to where you look (`move_relative`: head, left or right hand) instead of the game camera |
@@ -429,6 +431,36 @@ smoothing state are the game's and stay wall-checked; the shown eye sits between
 and the wanted position on a parallel line, offset by the look-at's own lag. It is not probed
 against walls again, so a brief clip at a corner while the look-at catches up is possible and
 needs a look on the device.
+
+## 5e. Phosphor mask (`phosphor`, `phosphor_size`)
+
+Status: host-tested (mask maths, constants, settings, menu rows); ARM64 build; a Mac preview of
+the maths on an eye dump. **Not run on the device, headset-unverified**: whether the shader loads
+on the Frame's GPU, what it costs, and how it reads through the lenses are all still to check.
+
+Asked for as a tube's sub-pixel phosphors over the eye images, like the Frame Visualiser's film
+grain. As there, it cannot be per pixel: the two eyes' images are not mirror images of each
+other, so the same pixel is a different direction in each and a pixel-locked pattern would float
+at no one depth. The mask is read from the direction a pixel looks in, in the room
+(`dk64vr::phosphorOverlay` fills `RT64::VrEyeOverlay` from the eye's submitted pose and edge
+tangents), so both eyes see the same stripe the same way: it sits infinitely far off, fuses, and
+stays put when the head turns, like the glass of a tube wrapped round the room.
+
+- Shape (`VrEyePhosphorPS.hlsl`, mirrored for tests in `dk64vr::phosphorMask`): red, green and
+  blue stripes by heading, a cosine each, a third of a triad apart; scanlines by height on the
+  cylinder (tan of elevation), one every 1.5 triads, 65% deep. `phosphor_size` is one triad's
+  width in degrees (default 0.25, about 5 px at 2160 across the view; 0.15-1.0).
+- Light: the mask keeps about a third of the light, so it is brightened 2x and highlights clip.
+  The eye image is gamma encoded and copied as bits, so the shader multiplies by the square root
+  of the mask rather than decoding. `phosphor` 0-1 blends from no mask to the full one.
+- Cost: no pass of its own. It replaces the eye copy's pixel shader (the draw into the swapchain
+  image, `VrEyeCopier`) when `VrHost::eyeOverlay` returns true; at `phosphor` 0 the plain copy
+  runs as before. Not measured.
+- Only the eyes that look into the world: not the cinema's screen views, the panel or the HUD
+  quad (the HUD stays clean over the mask). Eye dumps are taken from the image before the mask.
+
+Risks to look for when worn: moire with the lens correction at small sizes, colour fringing on
+detail that moves across the stripes as the head turns, and the dimmer picture.
 
 ## 5b. Measured (unattended, off-head, Steam launch, 2026-10-06)
 
@@ -652,6 +684,7 @@ logs and dumps (and composites rebuilt from them); it never pressed a button.
 | Smooth orbit about DK (`turn_mode` smooth) | verified unattended (`diag_turn_stick=1`: the shown heading turns at exactly the requested rate, 120 deg/s at full deflection, and stops on release); headset-unverified |
 | Larger world (`world_scale` 4-100), lower/closer origin (`camera_lower`, `camera_closer`) | host-tested (math, spline/cut/orbit composition, default byte parity, range/round-trip/env); headset-unverified; [device check](VR_CAMERA_CHECK.md) |
 | Physical eye near (`eye_near_m`), per-projection fog/depth remap | host-tested (frustum/depth/fog/clamp equality, primitive/decal/cap conversion, large-coordinate sky margin, settings/env); headset-unverified; [device A/B](VR_CAMERA_CHECK.md) |
+| Phosphor mask (`phosphor`) | host-tested (maths, settings, rows), ARM64 build, Mac preview; not run on the device; headset-unverified (section 5e) |
 | Manual camera (`camera_auto_rotate` off) | host-tested (setting, menu row); verified unattended in open DK Isles (yaw holds at 0.0 deg while DK runs, C-button turns intact); walls and tunnels not exercised; headset-unverified (section 5d) |
 | Camera smoothing (`camera_smoothing` medium) | host-tested; verified unattended (`[vr-cam]` before/after, section 5c); headset-unverified |
 | Transitions fade in stereo, pause/recomp menu over the frozen dimmed world | verified unattended (intro transitions freeze and fade, pause panel and recomp menu over the frozen world in the layer log); headset-unverified |

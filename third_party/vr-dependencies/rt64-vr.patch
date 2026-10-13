@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 79dfc38..95f3bc4 100644
+index 79dfc38..fdfd730 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -106,6 +106,12 @@ set(ANDROID_ABI arm64-v8a)
@@ -75,13 +75,14 @@ index 79dfc38..95f3bc4 100644
  if (${RT64_STATIC})
      add_library(rt64 STATIC ${SOURCES})
  else()
-@@ -553,6 +578,12 @@ build_vertex_shader( rt64 "src/shaders/Im3DVS.hlsl")
+@@ -553,6 +578,13 @@ build_vertex_shader( rt64 "src/shaders/Im3DVS.hlsl")
  build_pixel_shader(  rt64 "src/shaders/ComposePS.hlsl")
  build_pixel_shader(  rt64 "src/shaders/DebugPS.hlsl")
  build_pixel_shader(  rt64 "src/shaders/Im3DPS.hlsl")
 +if (RT64_VR)
 +    build_pixel_shader(rt64 "src/shaders/VrHudSolvePS.hlsl")
 +    build_pixel_shader(rt64 "src/shaders/VrEyeCopyPS.hlsl")
++    build_pixel_shader(rt64 "src/shaders/VrEyePhosphorPS.hlsl")
 +    build_vertex_shader(rt64 "src/shaders/VrMaskVS.hlsl")
 +    build_pixel_shader(rt64 "src/shaders/VrMaskPS.hlsl")
 +endif()
@@ -366,10 +367,10 @@ index 0000000..94af309
 +};
 diff --git a/src/hle/rt64_vr.h b/src/hle/rt64_vr.h
 new file mode 100644
-index 0000000..fbadbd1
+index 0000000..76324a3
 --- /dev/null
 +++ b/src/hle/rt64_vr.h
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,209 @@
 +//
 +// RT64
 +//
@@ -454,6 +455,16 @@ index 0000000..fbadbd1
 +        uint32_t clears = 0;
 +    };
 +
++    // A phosphor mask over an eye's finished image (VrEyePhosphorPS.hlsl, pushed as it is): the
++    // room-from-eye rotation's rows with the eye's edge tangents, the mask's shape and the target.
++    struct VrEyeOverlay {
++        float room0[4];   // row 0, tangent of the left edge
++        float room1[4];   // row 1, tangent of the right edge
++        float room2[4];   // row 2, tangent of the top edge
++        float shape[4];   // tangent of the bottom edge, triads a radian, scanlines a unit of tan(elevation), strength 0-1
++        float target[4];  // 1 / width, 1 / height, gain at full strength, scanline depth 0-1
++    };
++
 +    class VrHost {
 +    public:
 +        virtual ~VrHost() = default;
@@ -507,6 +518,9 @@ index 0000000..fbadbd1
 +        // attachment in COLOR_WRITE (a view of the swapchain image keeping its bits), for RT64
 +        // to draw the finished image into. Null: RT64 lets recordEye copy it.
 +        virtual RenderFramebuffer *eyeFramebuffer(uint32_t eye, uint32_t *width, uint32_t *height) = 0;
++        // Workload thread, eye passes, with eyeFramebuffer. True: the image is drawn into it through
++        // the phosphor mask described in `overlay` instead of copied unchanged.
++        virtual bool eyeOverlay(uint32_t eye, VrEyeOverlay &overlay) { return false; }
 +
 +        // Workload thread, eye passes. The eye's commands completed on the GPU.
 +        virtual void eyeDone(uint32_t eye, const VrEyeStats &stats) = 0;
@@ -568,10 +582,10 @@ index 0000000..fbadbd1
 +};
 diff --git a/src/hle/rt64_vr_hud.cpp b/src/hle/rt64_vr_hud.cpp
 new file mode 100644
-index 0000000..0dc6021
+index 0000000..282498d
 --- /dev/null
 +++ b/src/hle/rt64_vr_hud.cpp
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,202 @@
 +//
 +// RT64
 +//
@@ -583,6 +597,7 @@ index 0000000..0dc6021
 +#include "shaders/FullScreenVS.hlsl.spirv.h"
 +#include "shaders/VrHudSolvePS.hlsl.spirv.h"
 +#include "shaders/VrEyeCopyPS.hlsl.spirv.h"
++#include "shaders/VrEyePhosphorPS.hlsl.spirv.h"
 +#include "shaders/VrMaskVS.hlsl.spirv.h"
 +#include "shaders/VrMaskPS.hlsl.spirv.h"
 +
@@ -607,6 +622,18 @@ index 0000000..0dc6021
 +        pipelineDesc.vertexShader = vertexShader.get();
 +        pipelineDesc.pixelShader = pixelShader.get();
 +        pipeline = device->createGraphicsPipeline(pipelineDesc);
++
++        // The same draw through the phosphor mask, with the mask's constants pushed.
++        RenderPipelineLayoutBuilder phosphorBuilder;
++        phosphorBuilder.begin();
++        phosphorBuilder.addPushConstant(0, 0, sizeof(VrEyeOverlay), RenderShaderStageFlag::PIXEL);
++        phosphorBuilder.addDescriptorSet(layoutSet);
++        phosphorBuilder.end();
++        phosphorLayout = phosphorBuilder.create(device);
++        std::unique_ptr<RenderShader> phosphorShader = device->createShader(VrEyePhosphorPSBlobSPIRV, sizeof(VrEyePhosphorPSBlobSPIRV), "PSMain", RenderShaderFormat::SPIRV);
++        pipelineDesc.pipelineLayout = phosphorLayout.get();
++        pipelineDesc.pixelShader = phosphorShader.get();
++        phosphorPipeline = device->createGraphicsPipeline(pipelineDesc);
 +        for (uint32_t eye = 0; eye < 2; eye++) {
 +            descriptorSets[eye] = std::make_unique<VrEyeCopyDescriptorSet>(device);
 +        }
@@ -614,7 +641,7 @@ index 0000000..0dc6021
 +        return (pipeline != nullptr);
 +    }
 +
-+    void VrEyeCopier::record(RenderCommandList *commandList, uint32_t eye, RenderTexture *source, RenderFramebuffer *dst, uint32_t width, uint32_t height) {
++    void VrEyeCopier::record(RenderCommandList *commandList, uint32_t eye, RenderTexture *source, RenderFramebuffer *dst, uint32_t width, uint32_t height, const VrEyeOverlay *overlay) {
 +        if ((pipeline == nullptr) || (dst == nullptr) || (source == nullptr) || (eye > 1)) {
 +            return;
 +        }
@@ -626,8 +653,16 @@ index 0000000..0dc6021
 +        }
 +
 +        commandList->setFramebuffer(dst);
-+        commandList->setPipeline(pipeline.get());
-+        commandList->setGraphicsPipelineLayout(pipelineLayout.get());
++        if ((overlay != nullptr) && (phosphorPipeline != nullptr)) {
++            commandList->setPipeline(phosphorPipeline.get());
++            commandList->setGraphicsPipelineLayout(phosphorLayout.get());
++            commandList->setGraphicsPushConstants(0, overlay);
++        }
++        else {
++            commandList->setPipeline(pipeline.get());
++            commandList->setGraphicsPipelineLayout(pipelineLayout.get());
++        }
++
 +        commandList->setGraphicsDescriptorSet(descriptorSets[eye]->get(), 0);
 +        commandList->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
 +        commandList->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
@@ -755,10 +790,10 @@ index 0000000..0dc6021
 +};
 diff --git a/src/hle/rt64_vr_hud.h b/src/hle/rt64_vr_hud.h
 new file mode 100644
-index 0000000..ca03b21
+index 0000000..5093b54
 --- /dev/null
 +++ b/src/hle/rt64_vr_hud.h
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,95 @@
 +//
 +// RT64
 +//
@@ -772,6 +807,7 @@ index 0000000..ca03b21
 +
 +#include "common/rt64_plume.h"
 +#include "render/rt64_descriptor_sets.h"
++#include "rt64_vr.h"
 +
 +namespace RT64 {
 +    struct VrHudSolveDescriptorSet : RenderDescriptorSetBase {
@@ -809,11 +845,14 @@ index 0000000..ca03b21
 +    public:
 +        bool setup(RenderDevice *device);
 +        // source in SHADER_READ; dst an R8G8B8A8_UNORM colour attachment in COLOR_WRITE (left there).
-+        void record(RenderCommandList *commandList, uint32_t eye, RenderTexture *source, RenderFramebuffer *dst, uint32_t width, uint32_t height);
++        // overlay: null for the plain copy, or the host's phosphor mask (rt64_vr.h, eyeOverlay).
++        void record(RenderCommandList *commandList, uint32_t eye, RenderTexture *source, RenderFramebuffer *dst, uint32_t width, uint32_t height, const VrEyeOverlay *overlay = nullptr);
 +
 +    private:
 +        std::unique_ptr<RenderPipelineLayout> pipelineLayout;
 +        std::unique_ptr<RenderPipeline> pipeline;
++        std::unique_ptr<RenderPipelineLayout> phosphorLayout;
++        std::unique_ptr<RenderPipeline> phosphorPipeline;
 +        std::unique_ptr<VrEyeCopyDescriptorSet> descriptorSets[2];
 +        RenderTexture *boundSource[2] = {};
 +    };
@@ -925,7 +964,7 @@ index 8ea27d5..aba85e6 100644
 \ No newline at end of file
 +};
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..0e2da58 100644
+index 5a331aa..be407df 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
 @@ -4,10 +4,17 @@
@@ -1237,7 +1276,7 @@ index 5a331aa..0e2da58 100644
  
                      // Transition the render targets in case the present queue will show them so it doesn't have to perform transitions.
                      if (colorTarget != nullptr && depthTarget != nullptr) {
-@@ -838,9 +1046,70 @@ namespace RT64 {
+@@ -838,9 +1046,72 @@ namespace RT64 {
              }
  
              ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 1);
@@ -1261,8 +1300,10 @@ index 5a331aa..0e2da58 100644
 +                    uint32_t eyeFbWidth = 0, eyeFbHeight = 0;
 +                    RenderFramebuffer *eyeFramebuffer = (vrEyeCopier != nullptr) ? vrHost->eyeFramebuffer(uint32_t(vrEye), &eyeFbWidth, &eyeFbHeight) : nullptr;
 +                    if (eyeFramebuffer != nullptr) {
++                        VrEyeOverlay eyeOverlay;
++                        const bool overlaid = vrHost->eyeOverlay(uint32_t(vrEye), eyeOverlay);
 +                        vrEyeCopier->record(ext.workloadGraphicsWorker->commandList.get(), uint32_t(vrEye), eyeTarget.texture.get(), eyeFramebuffer,
-+                            std::min(eyeFbWidth, vrFrame.eyeWidth), std::min(eyeFbHeight, vrFrame.eyeHeight));
++                            std::min(eyeFbWidth, vrFrame.eyeWidth), std::min(eyeFbHeight, vrFrame.eyeHeight), overlaid ? &eyeOverlay : nullptr);
 +                    }
 +
 +                    vrHost->recordEye(uint32_t(vrEye), ext.workloadGraphicsWorker->commandList.get(), eyeTarget.texture.get(), vrFrame.eyeWidth, vrFrame.eyeHeight, eyeFramebuffer != nullptr);
@@ -1308,7 +1349,7 @@ index 5a331aa..0e2da58 100644
              ext.workloadGraphicsWorker->wait();
              workerMutex.unlock();
  
-@@ -861,9 +1130,83 @@ namespace RT64 {
+@@ -861,9 +1132,83 @@ namespace RT64 {
          rendererCPUProfiler.end();
          rendererCPUProfiler.log();
          rendererCPUProfiler.reset();
@@ -1392,7 +1433,7 @@ index 5a331aa..0e2da58 100644
      void WorkloadQueue::threadAdvanceBarrier() {
          std::scoped_lock<std::mutex> cursorLock(cursorMutex);
          barrierCursor = (barrierCursor + 1) % workloads.size();
-@@ -1176,6 +1519,653 @@ namespace RT64 {
+@@ -1176,6 +1521,653 @@ namespace RT64 {
          }
      }
      
@@ -2046,7 +2087,7 @@ index 5a331aa..0e2da58 100644
      void WorkloadQueue::idleThreadLoop() {
          // Beware traveler as you enter the zone of dirty driver hacks. Given N64 games are not exactly a demanding thing to render
          // nowadays for modern GPUs and due to how the plugin's cooperative multiqueue system works, it's sometimes just not possible
-@@ -1221,4 +2211,4 @@ namespace RT64 {
+@@ -1221,4 +2213,4 @@ namespace RT64 {
              }
          }
      }
@@ -3402,6 +3443,52 @@ index 0000000..10ce152
 +
 +float4 PSMain(in float4 pos : SV_Position) : SV_TARGET {
 +    return gSource.Load(int3(int2(pos.xy), 0));
++}
+diff --git a/src/shaders/VrEyePhosphorPS.hlsl b/src/shaders/VrEyePhosphorPS.hlsl
+new file mode 100644
+index 0000000..efd6b45
+--- /dev/null
++++ b/src/shaders/VrEyePhosphorPS.hlsl
+@@ -0,0 +1,40 @@
++//
++// RT64
++//
++// VR eye copy with a phosphor mask (rt64_vr.h, eyeOverlay): the eye image drawn into the host's
++// swapchain image as VrEyeCopyPS does, through red, green and blue stripes and scanlines. The
++// mask is read from the direction a pixel looks in, in the room, so both eyes see the same
++// stripe the same way (it sits infinitely far off and fuses) and it stays put when the head
++// turns, like the glass of a tube. Compiled only with RT64_VR.
++//
++
++struct VrEyePhosphorCB {
++    float4 room0;   // room-from-eye rotation, row 0; w = tangent of the left edge
++    float4 room1;   // row 1; w = tangent of the right edge
++    float4 room2;   // row 2; w = tangent of the top edge
++    float4 shape;   // tangent of the bottom edge, triads a radian, scanlines a unit of tan(elevation), strength
++    float4 target;  // 1 / width, 1 / height, gain at full strength, scanline depth
++};
++
++[[vk::push_constant]] ConstantBuffer<VrEyePhosphorCB> gConstants : register(b0);
++
++Texture2D<float4> gSource : register(t1);
++
++float4 PSMain(in float4 pos : SV_Position) : SV_TARGET {
++    float4 color = gSource.Load(int3(int2(pos.xy), 0));
++    float2 uv = pos.xy * gConstants.target.xy;
++    float3 eyeDir = float3(lerp(gConstants.room0.w, gConstants.room1.w, uv.x), lerp(gConstants.room2.w, gConstants.shape.x, uv.y), -1.0f);
++    float3 dir = float3(dot(gConstants.room0.xyz, eyeDir), dot(gConstants.room1.xyz, eyeDir), dot(gConstants.room2.xyz, eyeDir));
++
++    // A tube wrapped round the room: stripes by heading, scanlines by height on the cylinder.
++    float heading = atan2(dir.x, -dir.z);
++    float height = dir.y * rsqrt(max(dir.x * dir.x + dir.z * dir.z, 1e-6f));
++    float3 stripe = 0.5f + 0.5f * cos(6.2831853f * (heading * gConstants.shape.y - float3(0.0f, 1.0f, 2.0f) / 3.0f));
++    float scan = 0.5f + 0.5f * cos(6.2831853f * height * gConstants.shape.z);
++    float3 mask = stripe * lerp(1.0f, scan, gConstants.target.w) * gConstants.target.z;
++
++    // The image is gamma encoded and written as it is; the square root stands in for the
++    // encoding, so the mask scales light, not code values.
++    float3 factor = sqrt(lerp(float3(1.0f, 1.0f, 1.0f), mask, gConstants.shape.w));
++    return float4(saturate(color.rgb * factor), color.a);
 +}
 diff --git a/src/shaders/VrHudSolvePS.hlsl b/src/shaders/VrHudSolvePS.hlsl
 new file mode 100644

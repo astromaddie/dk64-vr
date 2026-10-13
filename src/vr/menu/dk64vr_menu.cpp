@@ -139,7 +139,7 @@ const char *dkHeightCompare(double worldScale) {
 namespace {
 
 enum class Kind { Seg, Toggle, Slider, Stepper, Height, Info, Action, Map };
-enum class Fmt { None, Pct, PctFlat, Metres, DegPerSec, Blink, Times1, Times2, Percent0, Offset };
+enum class Fmt { None, Pct, PctFlat, Metres, DegPerSec, Blink, Times1, Times2, Percent0, Offset, PctOff, Degrees2 };
 enum class When { Always, TurnOn, TurnSnap, TurnSmooth, Vignette, Hud, Cinema, FovOn, ResManual, Roomscale };
 enum class Virt { None, MoveRef, ResAuto };
 
@@ -271,6 +271,10 @@ std::vector<Row> buildRows() {
           "Eye image size against the runtime's recommendation. Applies next launch.", W::ResManual, false, Virt::None, nullptr },
         { "foveation", "foveation", D, "Foveated rendering", K::Seg, { { 0, "Off", nullptr }, { 1, "Low", nullptr }, { 2, "Medium", "Med" }, { 3, "High", nullptr } }, 0, 0, 0, F::None,
           "Draws the edge of each eye at lower detail. High saves the most GPU time.", W::Always, false, Virt::None, "Less detail at the edge of view" },
+        { "phosphor", "phosphor", D, "CRT phosphors", K::Slider, {}, 0, 1, 0.1, F::PctOff,
+          "Red, green and blue stripes and scanlines over the world, like a tube's glass around you.", W::Always, false, Virt::None, nullptr },
+        { "phosphor_size", "phosphor_size", D, "Phosphor size", K::Slider, {}, 0.15, 1, 0.05, F::Degrees2,
+          "Width of one red-green-blue stripe group. Larger is coarser and easier to see.", W::Always, false, Virt::None, nullptr },
         { "foveation_eye_tracked", "foveation_eye_tracked", D, "Follow your eyes", K::Toggle, {}, 0, 0, 0, F::None,
           "Moves the sharp area to where you look. Without it the sharp area stays at the lens centre.", W::FovOn, false, Virt::None, nullptr },
 
@@ -322,6 +326,8 @@ std::string fmtValue(Fmt f, double v) {
         case Fmt::Blink: return (v < 0.001) ? std::string("Off") : fmtNumber("%.2f s", v);
         case Fmt::Times1: return fmtNumber("%.1f\xc3\x97", v);
         case Fmt::Times2: return fmtNumber("%.2f\xc3\x97", v);
+        case Fmt::PctOff: return (v < 0.001) ? std::string("Off") : fmtNumber("%.0f%%", v * 100.0);
+        case Fmt::Degrees2: return fmtNumber("%.2f\xc2\xb0", v);
         case Fmt::Percent0: return fmtNumber("%.0f%%", v);
         case Fmt::Offset: return (v > 0.001 ? std::string("+") : std::string()) + fmtNumber("%.2f m", v);
         default: return fmtNumber("%g", v);

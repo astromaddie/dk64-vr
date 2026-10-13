@@ -49,6 +49,11 @@ static const sfvr_setting_key port_keys[] = {
 	// a critically damped follower on the camera's orientation (0.06 s and 0.12 s). Hard cuts
 	// reset it; first person and the cinema are never smoothed. docs/VR_ARCHITECTURE.md 5c.
 	{ "camera_smoothing", SFVR_SETTING_ENUM, 2.0, 0.0, 3.0, camera_smoothing_values },
+	// A tube's phosphor stripes and scanlines over the eye images (docs/VR_ARCHITECTURE.md 5e):
+	// strength 0-1 (0 = off, the plain eye copy) and the width of one red-green-blue triad in
+	// degrees. Read from the direction looked in, so both eyes see the same mask.
+	{ "phosphor", SFVR_SETTING_FLOAT, 0.0, 0.0, 1.0, NULL },
+	{ "phosphor_size", SFVR_SETTING_FLOAT, 0.25, 0.15, 1.0, NULL },
 	// Off: the game camera turns only when the wearer turns it (right stick, C buttons, R). The
 	// game stops swinging it behind Donkey Kong and the view keeps its heading while the camera
 	// catches up; its wall avoidance still applies. docs/VR_ARCHITECTURE.md 5d.
