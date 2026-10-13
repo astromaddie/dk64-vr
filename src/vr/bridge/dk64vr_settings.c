@@ -49,6 +49,10 @@ static const sfvr_setting_key port_keys[] = {
 	// a critically damped follower on the camera's orientation (0.06 s and 0.12 s). Hard cuts
 	// reset it; first person and the cinema are never smoothed. docs/VR_ARCHITECTURE.md 5c.
 	{ "camera_smoothing", SFVR_SETTING_ENUM, 2.0, 0.0, 3.0, camera_smoothing_values },
+	// Off: the game camera turns only when the wearer turns it (right stick, C buttons, R). The
+	// game stops swinging it behind Donkey Kong and the view keeps its heading while the camera
+	// catches up; its wall avoidance still applies. docs/VR_ARCHITECTURE.md 5d.
+	{ "camera_auto_rotate", SFVR_SETTING_BOOL, 1.0, 0.0, 1.0, NULL },
 	// Right stick X: a comfort turn (turn_mode, snap_angle: turns the game camera's heading at
 	// once) or the game's own C-left/C-right camera swing.
 	{ "right_stick_x", SFVR_SETTING_ENUM, 0.0, 0.0, 1.0, right_stick_values },

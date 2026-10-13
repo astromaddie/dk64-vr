@@ -43,6 +43,9 @@ DECLARE_FUNC(s32, recomp_vr_is_active);
 DECLARE_FUNC(void, recomp_vr_publish_game_state, const struct VrGameState*);
 // Comfort turn in whole degrees, positive = right (src/vr/include/dk64vr_control.h).
 DECLARE_FUNC(s32, recomp_vr_take_turn);
+// Nonzero while the camera should turn only when the player turns it (setting
+// camera_auto_rotate off, third-person play). Always 0 without the VR renderer.
+DECLARE_FUNC(s32, recomp_vr_manual_camera);
 // Diagnostic: nonzero once when the host wants the HUD counters shown (diag_hud_seconds).
 DECLARE_FUNC(s32, recomp_vr_take_hud_diag);
 

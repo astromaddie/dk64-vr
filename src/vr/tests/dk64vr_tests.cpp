@@ -543,6 +543,7 @@ static void testSettings() {
     CHECK_NEAR(dk64vr_settings_get(&s, "right_stick_x"), 0.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "cutscenes"), 0.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "level_pitch"), 1.0, 0.0);
+    CHECK_NEAR(dk64vr_settings_get(&s, "camera_auto_rotate"), 1.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "foveation"), 3.0, 0.0);
     CHECK_NEAR(dk64vr_settings_get(&s, "foveation_eye_tracked"), 1.0, 0.0);
 

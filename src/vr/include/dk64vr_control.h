@@ -25,6 +25,13 @@ int dk64vr_is_paused(void);
 void dk64vr_request_turn(int degrees);
 int dk64vr_take_turn(void);
 
+// Manual camera (setting camera_auto_rotate off): the host sets it while the wearer is in
+// third-person stereo play; the camera patches read it through recomp_vr_manual_camera and stop
+// turning the camera on their own (patches/sound_options_patches.c func_global_asm_80621174,
+// patches/patches_interpolation.c vr_hold_camera_heading). Always 0 without the VR renderer.
+void dk64vr_set_manual_camera(int manual);
+int dk64vr_manual_camera(void);
+
 // Diagnostic (diag_hud_seconds): ask the game to show its HUD counters once, through its own
 // "show this counter" function, so an unattended run can dump the HUD. Taken by vr_frame_hook.
 void dk64vr_request_hud_diag(void);

@@ -224,6 +224,8 @@ std::vector<Row> buildRows() {
           "Positive moves closer; negative values are saved while the native camera stays in place until collision checks support extension.", W::Always, false, Virt::None, nullptr },
         { "camera_smoothing", "camera_smoothing", C, "Camera smoothing", K::Seg, { { 0, "Off", nullptr }, { 1, "Low", nullptr }, { 2, "Medium", "Med" }, { 3, "High", nullptr } }, 0, 0, 0, F::None,
           "Calms the game camera's follow motion so the world drifts less.", W::Always, false, Virt::None, "Eases the game camera's swings" },
+        { "camera_auto_rotate", "camera_auto_rotate", C, "Automatic camera turning", K::Toggle, {}, 0, 0, 0, F::None,
+          "Off: the camera turns only when you turn it. It still keeps out of walls.", W::Always, false, Virt::None, nullptr },
         { "level_pitch", "level_pitch", C, "Level horizon", K::Toggle, {}, 0, 0, 0, F::None,
           "Drops the game camera's pitch and roll. Your head does the looking up and down.", W::Always, false, Virt::None, nullptr },
         { "vignette", "vignette", C, "Comfort vignette", K::Toggle, {}, 0, 0, 0, F::None,

@@ -2246,6 +2246,7 @@ private:
                 menu::uiRefreshSettings(settings);
             }
         }
+        dk64vr_set_manual_camera(((setting("camera_auto_rotate") == 0.0) && context.stereoPlay) ? 1 : 0);
         InputResult r = mapper.update(s, inputConfig(), context, displayS, dt);
         // Diagnostic: right stick X held at diag_turn_stick for 4 s, released for 4 s, in
         // stereo play, as the mapper would turn with it (snap: one step a hold).

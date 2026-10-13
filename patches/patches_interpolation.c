@@ -5,6 +5,7 @@
 #include "options.h"
 #include "patches_main.h"
 #include "patches_interpolation.h"
+#include "vr_state.h"
 
 #define INTERPOLATION_DEBUG 0
 
@@ -81,6 +82,29 @@ Gfx *handle_interpolation(Gfx * dl, interpolationIDs id, u8 decrement) {
         gEXMatrixGroupSimpleNormal(dl++, G_EX_ID_AUTO, G_EX_NOPUSH, G_MTX_PROJECTION, G_EX_EDIT_NONE);
     }
     return dl;
+}
+
+// @recomp VR manual camera (camera_auto_rotate off). The game computes where the camera should be
+// (camera->position, looking at AAD->unk78..80, both wall-checked) and then lets the shown eye
+// trail it in a straight line, so the view swings whenever the player moves sideways and after
+// every turn. Keep the shown eye's height and distance, but put it on the wanted heading behind
+// the shown look-at point, never farther out than the wanted distance, so it stays on the line
+// the game cleared.
+static void vr_hold_camera_heading(Actor *camera, CameraPaad *AAD, f32 *eye_x, f32 *eye_z, f32 at_x, f32 at_z) {
+    f32 dx = AAD->unk78 - camera->position.f[0];
+    f32 dz = AAD->unk80 - camera->position.f[2];
+    f32 want = _sqrtf(SQ(dx) + SQ(dz));
+    f32 shown = _sqrtf(SQ(at_x - *eye_x) + SQ(at_z - *eye_z));
+
+    // Looking straight down has no heading to hold.
+    if (want < 5.0f) {
+        return;
+    }
+    if (shown > want) {
+        shown = want;
+    }
+    *eye_x = at_x - (dx / want) * shown;
+    *eye_z = at_z - (dz / want) * shown;
 }
 
 RECOMP_PATCH void func_global_asm_8061DBD4(Actor* arg0, f32* arg1, f32* arg2, f32* arg3, f32* arg4, f32* arg5, f32* arg6, f32* arg7, f32* arg8, f32* arg9) {
@@ -193,6 +217,9 @@ RECOMP_PATCH void func_global_asm_8061DBD4(Actor* arg0, f32* arg1, f32* arg2, f3
                     global_properties_bitfield ^= 0x2000;
                 } else {
                     func_global_asm_80625320(arg0, arg1, arg2, arg3, arg4, arg5, arg6);
+                    if ((AAD->unkF3 == 1) && recomp_vr_manual_camera()) {
+                        vr_hold_camera_heading(arg0, AAD, arg1, arg3, *arg4, *arg6);
+                    }
                 }
             }
             break;

@@ -144,6 +144,18 @@ extern "C" int dk64vr_take_turn(void) {
 }
 
 namespace {
+std::atomic<int> g_manual_camera{0};
+}
+
+extern "C" void dk64vr_set_manual_camera(int manual) {
+    g_manual_camera.store(manual != 0 ? 1 : 0, std::memory_order_relaxed);
+}
+
+extern "C" int dk64vr_manual_camera(void) {
+    return (dk64vr_is_active() != 0) ? g_manual_camera.load(std::memory_order_relaxed) : 0;
+}
+
+namespace {
 std::atomic<int> g_hud_diag{0};
 }
 
@@ -181,6 +193,11 @@ extern "C" void recomp_vr_publish_game_state(uint8_t* rdram, recomp_context* ctx
 extern "C" void recomp_vr_take_turn(uint8_t* rdram, recomp_context* ctx) {
     (void)rdram;
     _return(ctx, dk64vr_take_turn());
+}
+
+extern "C" void recomp_vr_manual_camera(uint8_t* rdram, recomp_context* ctx) {
+    (void)rdram;
+    _return(ctx, dk64vr_manual_camera());
 }
 
 extern "C" void recomp_vr_take_hud_diag(uint8_t* rdram, recomp_context* ctx) {

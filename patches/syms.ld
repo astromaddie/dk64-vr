@@ -82,3 +82,4 @@ recomp_vr_is_active = 0x8F000160;
 recomp_vr_publish_game_state = 0x8F000164;
 recomp_vr_take_turn = 0x8F000168;
 recomp_vr_take_hud_diag = 0x8F00016C;
+recomp_vr_manual_camera = 0x8F000170;

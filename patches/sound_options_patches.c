@@ -181,6 +181,25 @@ extern int gameIsInDKTVMode(void);
 
 // @recomp: Camera Type
 RECOMP_PATCH u8 func_global_asm_80621174(s32 arg0, PlayerAdditionalActorData *arg1, Actor *arg2) {
+    // @recomp VR manual camera: this gate lets func_global_asm_80624978 ease the camera's
+    // heading toward the player's facing. With camera_auto_rotate off, drop every "while the
+    // player moves" case (follow maps, low ceilings, the Follow camera type, a wall touching
+    // the camera) and keep the ones the game forces whatever the player does (focus lock,
+    // special camera modes and player states). Wall and corner avoidance write the heading
+    // elsewhere (func_global_asm_80620B38, 80620F00, 80620628) and are untouched.
+    if (recomp_vr_manual_camera()) {
+        // clang-format off
+        return (arg2->control_state == 0x5B) ||
+               (D_global_asm_807FBB64 & 0x08000000) ||
+               (arg1->unkAC & 4) ||
+               (arg1->unkF0_u8[3] == 0xA) ||
+               (arg1->unkF0_u8[3] == 0xD) ||
+               (arg1->unkF0_u8[3] == 5) ||
+               (arg1->unkF0_u8[3] == 0xC) ||
+               (arg2->control_state == 0x6E) ||
+               (arg2->unk58 == 8);
+        // clang-format on
+    }
     // Formatting is off here for better manual formatting. Whitespace doesn't affect the match here.
     // clang-format off
     return (arg2->control_state == 0x5B) ||
@@ -418,7 +437,14 @@ RECOMP_PATCH void func_global_asm_8061D1FC(Actor* arg0) {
             s16 vr_from = CaaD->unkB2;
             if (CaaD->unkF3 != 2) {
                 CaaD->unkB0 = 0;
-                CaaD->unkB2 = (CaaD->unkB2 - (vr_turn * 4096) / 360) & 0xFFF;
+                // 4096 units a turn: carry the remainder, or a smooth turn in whole degrees
+                // falls 3% short of what the host shows and the view drifts back later.
+                static s32 vr_turn_rem = 0;
+                s32 vr_units;
+                vr_turn_rem += vr_turn * 4096;
+                vr_units = vr_turn_rem / 360;
+                vr_turn_rem -= vr_units * 360;
+                CaaD->unkB2 = (CaaD->unkB2 - vr_units) & 0xFFF;
                 CaaD->unkF1 = 1; // Makes things snappy
             }
             recomp_printf("[vr] turn: camera heading %d -> %d (4096 a turn, mode %d)\n", vr_from, CaaD->unkB2, CaaD->unkF3);

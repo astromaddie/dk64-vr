@@ -265,6 +265,7 @@ AxA -> BxB (xS, target 2160, max ...)`.
 | `diag_camera_seconds` | 0 s | Camera motion without a wearer in stereo play, phases of N s: C-left tap, C-right tap, stick held forward-right, idle |
 | `diag_camera_log` | false | A `[vr-cam]` line every display frame: weight, linear and smoothed camera heading, pitch and position |
 | `diag_turn_stick` | 0 | Right stick X held at this deflection for 4 s, released for 4 s, in stereo play (a snap a hold, or the smooth orbit) |
+| `camera_auto_rotate` | true | Off: the camera turns only when the wearer turns it; wall avoidance stays (section 5d) |
 | `right_stick_x` | `turn` | `turn`: comfort turn (`turn_mode`, `snap_angle`, `smooth_turn_speed`); `camera`: the game's own C-left/C-right camera swing |
 | `move_from_view` | true | Left stick relative to where you look (`move_relative`: head, left or right hand) instead of the game camera |
 | `snap_blink` | 0 s | Optional black blink after a snap turn (the turn is instant without it) |
@@ -381,6 +382,53 @@ Donkey Kong running in a curve, idle; four steady 10 s windows, `raw` is what `o
 So the frame-to-frame change of the heading's speed (the jolt at every 30 Hz game frame and at the
 start and stop of a swing) is about 3x smaller in sd and 7-11x smaller at its worst, the position's
 5x; the overall motion (step sd and max) is unchanged. `match=` stayed at 1.4 units / 0.01 degrees.
+
+## 5d. Manual camera (`camera_auto_rotate` off)
+
+Status: host-tested (setting, menu row); verified unattended in DK Isles (below);
+**headset-unverified**. Walls, tunnels, follow maps and lock regions were not exercised.
+
+Unattended, 2026-10-13, Steam launch, `diag_camera_seconds=4` with `diag_camera_log`, same start
+position, raw game camera yaw per phase (three cycles each):
+
+| Phase | `camera_auto_rotate` on | off |
+| --- | --- | --- |
+| C-left, C-right taps | 44.4-44.8 deg each way | 44.8 deg each way |
+| Stick held forward-right, camera travels 127-129 units | 2.7 deg excursion, 10.5 deg of yaw travelled | 0.0 deg |
+| Idle | up to 0.3 deg | 0.0 deg |
+
+DK64's third-person camera turns on its own in two ways, both found in the retail code (the
+functions involved are unmatched in the decomp, so this is from `RecompiledFuncs`):
+
+- The heading itself (`CameraPaad::unkB2`) is eased toward Donkey Kong's facing by
+  `func_global_asm_80624978`, called from the position routine `func_global_asm_8062133C` whenever
+  the gate `func_global_asm_80621174` passes. With the Free camera type that is while he moves in a
+  follow map, under a low ceiling (`unkAC & 8`) or with a wall touching the camera (`unkFC`), and
+  always in a few special modes and states.
+- The shown eye trails the wanted position in a straight line (`func_global_asm_80625320` ->
+  `806256D0`: the state steps toward the target, then the output eases to the state) while the
+  look-at tracks him faster. So the view swings whenever he runs sideways, and for 4-6 s after any
+  heading change.
+
+With the setting off, in stereo third-person play (`dk64vr_set_manual_camera`, read by the patches
+through `recomp_vr_manual_camera`):
+
+- The gate keeps only the cases the game forces regardless of movement: focus lock (`unkAC & 4`),
+  camera modes 5, 0xA, 0xC and 0xD, control states 0x5B and 0x6E, actor type 8, map flag
+  0x08000000. The four "while moving" cases are dropped.
+- After the game's own smoothing, `vr_hold_camera_heading` (`patches/patches_interpolation.c`, mode
+  `unkF3 == 1` only) puts the shown eye on the wanted heading behind the shown look-at point. It
+  keeps the game's smoothed height and distance, capped at the wanted distance.
+- The comfort turn carries its remainder in heading units (4096 a turn), so whole-degree smooth
+  turn steps no longer fall 3% short of what the host shows.
+
+What still turns the camera: the right stick, C-left/C-right, R (centre), and the game's own wall
+handling, which is untouched: the wall slide in `func_global_asm_80620B38`, the blocked-view flip
+in `80620F00`/`80620628`, and the authored lock regions in `8061F53C`. The wanted position and the
+smoothing state are the game's and stay wall-checked; the shown eye sits between the look-at point
+and the wanted position on a parallel line, offset by the look-at's own lag. It is not probed
+against walls again, so a brief clip at a corner while the look-at catches up is possible and
+needs a look on the device.
 
 ## 5b. Measured (unattended, off-head, Steam launch, 2026-10-06)
 
@@ -604,6 +652,7 @@ logs and dumps (and composites rebuilt from them); it never pressed a button.
 | Smooth orbit about DK (`turn_mode` smooth) | verified unattended (`diag_turn_stick=1`: the shown heading turns at exactly the requested rate, 120 deg/s at full deflection, and stops on release); headset-unverified |
 | Larger world (`world_scale` 4-100), lower/closer origin (`camera_lower`, `camera_closer`) | host-tested (math, spline/cut/orbit composition, default byte parity, range/round-trip/env); headset-unverified; [device check](VR_CAMERA_CHECK.md) |
 | Physical eye near (`eye_near_m`), per-projection fog/depth remap | host-tested (frustum/depth/fog/clamp equality, primitive/decal/cap conversion, large-coordinate sky margin, settings/env); headset-unverified; [device A/B](VR_CAMERA_CHECK.md) |
+| Manual camera (`camera_auto_rotate` off) | host-tested (setting, menu row); verified unattended in open DK Isles (yaw holds at 0.0 deg while DK runs, C-button turns intact); walls and tunnels not exercised; headset-unverified (section 5d) |
 | Camera smoothing (`camera_smoothing` medium) | host-tested; verified unattended (`[vr-cam]` before/after, section 5c); headset-unverified |
 | Transitions fade in stereo, pause/recomp menu over the frozen dimmed world | verified unattended (intro transitions freeze and fade, pause panel and recomp menu over the frozen world in the layer log); headset-unverified |
 | Hidden desktop window (no black SteamVR box at the launcher) | verified unattended (the `valve.steam.desktopgame.<appid>` overlay is no longer created; launcher and game run); headset-unverified |

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-13 — Manual camera setting
+
+- Added `camera_auto_rotate` (VR settings, Comfort: "Automatic camera turning"). Off stops the game camera turning on its own in third-person play; its wall avoidance stays. Checked unattended in open DK Isles only, not worn.
+- Comfort turns now carry their remainder in the game's heading units, so smooth turns no longer end 3% short.
+
 ## 2026-10-11 — PR0 readiness preparation
 
 - Added experimental Steam Frame status, readiness evidence and a public ROM-free VR host-test workflow.
